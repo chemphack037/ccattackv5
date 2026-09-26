@@ -1,4 +1,4 @@
-
+pip3 install requests pysocks
 
 💡 Напоминания
 The author is not responsible for his actions, use it only for his server.

